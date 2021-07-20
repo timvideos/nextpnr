@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Claire Xen <claire@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
  *  Copyright (C) 2021  William D. Jones <wjones@wdj-consulting.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -403,12 +403,12 @@ struct Arch : BaseArch<ArchRanges>
     const ChipInfoPOD *chip_info;
     const PackageInfoPOD *package_info;
 
-    mutable std::unordered_map<IdStringList, PipId> pip_by_name;
+    mutable dict<IdStringList, PipId> pip_by_name;
 
     // fast access to  X and Y IdStrings for building object names
     std::vector<IdString> x_ids, y_ids;
     // inverse of the above for name->object mapping
-    std::unordered_map<IdString, int> id_to_x, id_to_y;
+    dict<IdString, int> id_to_x, id_to_y;
 
     // Helpers
     template <typename Id> const TileTypePOD *tile_info(Id &id) const
@@ -514,7 +514,7 @@ struct Arch : BaseArch<ArchRanges>
         return IdStringList(ids);
     }
 
-    DelayQuad getWireDelay(WireId wire) const override { return DelayQuad(0); }
+    DelayQuad getWireDelay(WireId wire) const override { return DelayQuad(0.01); }
 
     WireRange getWires() const override
     {
@@ -587,7 +587,7 @@ struct Arch : BaseArch<ArchRanges>
         return wire;
     }
 
-    DelayQuad getPipDelay(PipId pip) const override { return DelayQuad(0); }
+    DelayQuad getPipDelay(PipId pip) const override { return DelayQuad(0.01); }
 
     PipRange getPipsDownhill(WireId wire) const override
     {

@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -161,7 +161,8 @@ void rename_net(Context *ctx, NetInfo *net, IdString new_name)
     if (net == nullptr)
         return;
     NPNR_ASSERT(!ctx->nets.count(new_name));
-    std::swap(ctx->nets[net->name], ctx->nets[new_name]);
+    ctx->nets[new_name];
+    std::swap(ctx->nets.at(net->name), ctx->nets.at(new_name));
     ctx->nets.erase(net->name);
     net->name = new_name;
 }

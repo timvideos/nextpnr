@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -253,15 +253,15 @@ class ChainConstrainer
                         return i3_next;
                     return (CellInfo *)nullptr;
                 });
-        std::unordered_set<IdString> chained;
+        pool<IdString> chained;
         for (auto &base_chain : carry_chains) {
             for (auto c : base_chain.cells)
                 chained.insert(c->name);
         }
         // Any cells not in chains, but with carry enabled, must also be put in a single-carry chain
         // for correct processing
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (chained.find(cell.first) == chained.end() && is_lc(ctx, ci) &&
                 bool_or_default(ci->params, ctx->id("CARRY_ENABLE"))) {
                 CellChain sChain;
@@ -292,12 +292,14 @@ class ChainConstrainer
             // Place carry chain
             chain.cells.at(0)->constr_abs_z = true;
             chain.cells.at(0)->constr_z = 0;
+            chain.cells.at(0)->cluster = chain.cells.at(0)->name;
+
             for (int i = 1; i < int(chain.cells.size()); i++) {
                 chain.cells.at(i)->constr_x = 0;
                 chain.cells.at(i)->constr_y = (i / 8);
                 chain.cells.at(i)->constr_z = i % 8;
                 chain.cells.at(i)->constr_abs_z = true;
-                chain.cells.at(i)->constr_parent = chain.cells.at(0);
+                chain.cells.at(i)->cluster = chain.cells.at(0)->name;
                 chain.cells.at(0)->constr_children.push_back(chain.cells.at(i));
             }
         }

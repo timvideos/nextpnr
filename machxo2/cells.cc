@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2019  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2019  gatecat <gatecat@ds0.me>
  *  Copyright (C) 2021  William D. Jones <wjones@wdj-consulting.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -154,7 +154,7 @@ void lut_to_lc(const Context *ctx, CellInfo *lut, CellInfo *lc, bool no_dff)
     replace_port(lut, ctx->id("Z"), lc, ctx->id("F0"));
 }
 
-void dff_to_lc(Context *ctx, CellInfo *dff, CellInfo *lc, bool pass_thru_lut)
+void dff_to_lc(Context *ctx, CellInfo *dff, CellInfo *lc, LutType lut_type)
 {
     // FIXME: This will have to change once we support FFs with reset value of 1.
     lc->params[ctx->id("REG0_REGSET")] = std::string("RESET");
@@ -163,18 +163,25 @@ void dff_to_lc(Context *ctx, CellInfo *dff, CellInfo *lc, bool pass_thru_lut)
     replace_port(dff, ctx->id("LSR"), lc, ctx->id("LSR"));
     replace_port(dff, ctx->id("Q"), lc, ctx->id("Q0"));
 
-    // If a register's DI port is fed by a constant, options for placing are
-    // limited. Use the LUT to get around this.
-    if (pass_thru_lut) {
+    if (lut_type == LutType::PassThru) {
+        // If a register's DI port is fed by a constant, options for placing are
+        // limited. Use the LUT to get around this.
+        // LUT output will go to F0, which will feed back to DI0 input.
         lc->params[ctx->id("LUT0_INITVAL")] = Property(0xAAAA, 16);
-        ;
         replace_port(dff, ctx->id("DI"), lc, ctx->id("A0"));
         connect_ports(ctx, lc, ctx->id("F0"), lc, ctx->id("DI0"));
+    } else if (lut_type == LutType::None) {
+        // If there is no LUT, use the M0 input because DI0 requires
+        // going through the LUTs.
+        lc->params[ctx->id("REG0_SD")] = std::string("0");
+        replace_port(dff, ctx->id("DI"), lc, ctx->id("M0"));
     } else {
+        // Otherwise, there's a LUT being used in the slice and mapping DI to
+        // DI0 input is fine.
         replace_port(dff, ctx->id("DI"), lc, ctx->id("DI0"));
     }
 }
 
-void nxio_to_iob(Context *ctx, CellInfo *nxio, CellInfo *iob, std::unordered_set<IdString> &todelete_cells) {}
+void nxio_to_iob(Context *ctx, CellInfo *nxio, CellInfo *iob, pool<IdString> &todelete_cells) {}
 
 NEXTPNR_NAMESPACE_END

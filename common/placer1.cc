@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
  *
  *  Simulated annealing implementation based on arachne-pnr
  *  Copyright (C) 2015-2018 Cotton Seed
@@ -46,19 +46,6 @@
 #include "timing.h"
 #include "util.h"
 
-namespace std {
-template <> struct hash<std::pair<NEXTPNR_NAMESPACE_PREFIX IdString, std::size_t>>
-{
-    std::size_t operator()(const std::pair<NEXTPNR_NAMESPACE_PREFIX IdString, std::size_t> &idp) const noexcept
-    {
-        std::size_t seed = 0;
-        boost::hash_combine(seed, hash<NEXTPNR_NAMESPACE_PREFIX IdString>()(idp.first));
-        boost::hash_combine(seed, hash<std::size_t>()(idp.second));
-        return seed;
-    }
-};
-} // namespace std
-
 NEXTPNR_NAMESPACE_BEGIN
 
 class SAPlacer
@@ -87,8 +74,8 @@ class SAPlacer
         }
         diameter = std::max(max_x, max_y) + 1;
 
-        std::unordered_set<IdString> cell_types_in_use;
-        for (auto cell : sorted(ctx->cells)) {
+        pool<IdString> cell_types_in_use;
+        for (auto &cell : ctx->cells) {
             IdString cell_type = cell.second->type;
             cell_types_in_use.insert(cell_type);
         }
@@ -108,8 +95,8 @@ class SAPlacer
             net.second->udata = n++;
             net_by_udata.push_back(net.second.get());
         }
-        for (auto &region : sorted(ctx->region)) {
-            Region *r = region.second;
+        for (auto &region : ctx->region) {
+            Region *r = region.second.get();
             BoundingBox bb;
             if (r->constr_bels) {
                 bb.x0 = std::numeric_limits<int>::max();
@@ -225,14 +212,16 @@ class SAPlacer
         } else {
             for (auto &cell : ctx->cells) {
                 CellInfo *ci = cell.second.get();
-                if (ci->belStrength > STRENGTH_STRONG)
+                if (ci->belStrength > STRENGTH_STRONG) {
                     continue;
-                else if (ci->constr_parent != nullptr)
-                    continue;
-                else if (!ci->constr_children.empty() || ci->constr_z != ci->UNCONSTR)
-                    chain_basis.push_back(ci);
-                else
+                } else if (ci->cluster != ClusterId()) {
+                    if (ctx->getClusterRootCell(ci->cluster) == ci)
+                        chain_basis.push_back(ci);
+                    else
+                        continue;
+                } else {
                     autoplaced.push_back(ci);
+                }
             }
             require_legal = false;
             diameter = 3;
@@ -358,12 +347,12 @@ class SAPlacer
                     // Only increase temperature if something was moved
                     autoplaced.clear();
                     chain_basis.clear();
-                    for (auto cell : sorted(ctx->cells)) {
-                        if (cell.second->belStrength <= STRENGTH_STRONG && cell.second->constr_parent == nullptr &&
-                            !cell.second->constr_children.empty())
-                            chain_basis.push_back(cell.second);
+                    for (auto &cell : ctx->cells) {
+                        if (cell.second->belStrength <= STRENGTH_STRONG && cell.second->cluster != ClusterId() &&
+                            ctx->getClusterRootCell(cell.second->cluster) == cell.second.get())
+                            chain_basis.push_back(cell.second.get());
                         else if (cell.second->belStrength < STRENGTH_STRONG)
-                            autoplaced.push_back(cell.second);
+                            autoplaced.push_back(cell.second.get());
                     }
                     // temp = post_legalise_temp;
                     // diameter = std::min<int>(M, diameter * post_legalise_dia_scale);
@@ -419,8 +408,8 @@ class SAPlacer
                 }
             }
         }
-        for (auto cell : sorted(ctx->cells))
-            if (get_constraints_distance(ctx, cell.second) != 0)
+        for (auto &cell : ctx->cells)
+            if (get_constraints_distance(ctx, cell.second.get()) != 0)
                 log_error("constraint satisfaction check failed for cell '%s' at Bel '%s'\n", cell.first.c_str(ctx),
                           ctx->nameOfBel(cell.second->bel));
         timing_analysis(ctx);
@@ -507,12 +496,12 @@ class SAPlacer
     {
         static const double epsilon = 1e-20;
         moveChange.reset(this);
-        if (!require_legal && cell->isConstrained(false))
+        if (!require_legal && cell->cluster != ClusterId())
             return false;
         BelId oldBel = cell->bel;
         CellInfo *other_cell = ctx->getBoundBelCell(newBel);
         if (!require_legal && other_cell != nullptr &&
-            (other_cell->isConstrained(false) || other_cell->belStrength > STRENGTH_WEAK)) {
+            (other_cell->cluster != ClusterId() || other_cell->belStrength > STRENGTH_WEAK)) {
             return false;
         }
         int old_dist = get_constraints_distance(ctx, cell);
@@ -612,9 +601,9 @@ class SAPlacer
         if (bound != nullptr)
             ctx->unbindBel(newBel);
         ctx->unbindBel(oldBel);
-        ctx->bindBel(newBel, cell, cell->isConstrained(false) ? STRENGTH_STRONG : STRENGTH_WEAK);
+        ctx->bindBel(newBel, cell, (cell->cluster != ClusterId()) ? STRENGTH_STRONG : STRENGTH_WEAK);
         if (bound != nullptr) {
-            ctx->bindBel(oldBel, bound, bound->isConstrained(false) ? STRENGTH_STRONG : STRENGTH_WEAK);
+            ctx->bindBel(oldBel, bound, (bound->cluster != ClusterId()) ? STRENGTH_STRONG : STRENGTH_WEAK);
             if (cfg.netShareWeight > 0)
                 update_nets_by_tile(bound, ctx->getBelLocation(newBel), ctx->getBelLocation(oldBel));
         }
@@ -623,21 +612,11 @@ class SAPlacer
         return oldBel;
     }
 
-    // Discover the relative positions of all cells in a chain
-    void discover_chain(Loc baseLoc, CellInfo *cell, std::vector<std::pair<CellInfo *, Loc>> &cell_rel)
-    {
-        Loc cellLoc = ctx->getBelLocation(cell->bel);
-        Loc rel{cellLoc.x - baseLoc.x, cellLoc.y - baseLoc.y, cellLoc.z};
-        cell_rel.emplace_back(std::make_pair(cell, rel));
-        for (auto child : cell->constr_children)
-            discover_chain(baseLoc, child, cell_rel);
-    }
-
     // Attempt to swap a chain with a non-chain
     bool try_swap_chain(CellInfo *cell, BelId newBase)
     {
         std::vector<std::pair<CellInfo *, Loc>> cell_rel;
-        std::unordered_set<IdString> cells;
+        pool<IdString> cells;
         std::vector<std::pair<CellInfo *, BelId>> moves_made;
         std::vector<std::pair<CellInfo *, BelId>> dest_bels;
         double delta = 0;
@@ -647,32 +626,23 @@ class SAPlacer
         if (ctx->debug)
             log_info("finding cells for chain swap %s\n", cell->name.c_str(ctx));
 #endif
-        Loc baseLoc = ctx->getBelLocation(cell->bel);
-        discover_chain(baseLoc, cell, cell_rel);
-        Loc newBaseLoc = ctx->getBelLocation(newBase);
-        NPNR_ASSERT(newBaseLoc.z == baseLoc.z);
-        for (const auto &cr : cell_rel)
-            cells.insert(cr.first->name);
+        if (!ctx->getClusterPlacement(cell->cluster, newBase, dest_bels))
+            return false;
 
-        for (const auto &cr : cell_rel) {
-            Loc targetLoc = {newBaseLoc.x + cr.second.x, newBaseLoc.y + cr.second.y, cr.second.z};
-            BelId targetBel = ctx->getBelByLocation(targetLoc);
-            if (targetBel == BelId())
-                return false;
-            if (!ctx->isValidBelForCellType(cell->type, targetBel))
-                return false;
-            CellInfo *bound = ctx->getBoundBelCell(targetBel);
+        for (const auto &db : dest_bels)
+            cells.insert(db.first->name);
+
+        for (const auto &db : dest_bels) {
+            CellInfo *bound = ctx->getBoundBelCell(db.second);
             // We don't consider swapping chains with other chains, at least for the time being - unless it is
             // part of this chain
             if (bound != nullptr && !cells.count(bound->name) &&
-                (bound->belStrength >= STRENGTH_STRONG || bound->isConstrained(false)))
+                (bound->belStrength >= STRENGTH_STRONG || bound->cluster != ClusterId()))
                 return false;
 
             if (bound != nullptr)
-                if (!ctx->isValidBelForCellType(bound->type, cr.first->bel))
+                if (!ctx->isValidBelForCellType(bound->type, db.first->bel))
                     return false;
-
-            dest_bels.emplace_back(std::make_pair(cr.first, targetBel));
         }
 #if 0
         if (ctx->debug)
@@ -848,8 +818,8 @@ class SAPlacer
     // Set up the cost maps
     void setup_costs()
     {
-        for (auto net : sorted(ctx->nets)) {
-            NetInfo *ni = net.second;
+        for (auto &net : ctx->nets) {
+            NetInfo *ni = net.second.get();
             if (ignore_net(ni))
                 continue;
             net_bounds[ni->udata] = get_net_bounds(ni);
@@ -1082,7 +1052,7 @@ class SAPlacer
                                 mc.already_changed_arcs[pn->udata][i] = true;
                             }
                 } else if (port.second.type == PORT_IN) {
-                    auto usr = fast_port_to_user.at(&port.second);
+                    auto usr = fast_port_to_user.at(std::make_pair(cell->name, port.first));
                     if (!mc.already_changed_arcs[pn->udata][usr]) {
                         mc.changed_arcs.emplace_back(std::make_pair(pn->udata, usr));
                         mc.already_changed_arcs[pn->udata][usr] = true;
@@ -1135,11 +1105,11 @@ class SAPlacer
     // Build the cell port -> user index
     void build_port_index()
     {
-        for (auto net : sorted(ctx->nets)) {
-            NetInfo *ni = net.second;
+        for (auto &net : ctx->nets) {
+            NetInfo *ni = net.second.get();
             for (size_t i = 0; i < ni->users.size(); i++) {
                 auto &usr = ni->users.at(i);
-                fast_port_to_user[&(usr.cell->ports.at(usr.port))] = i;
+                fast_port_to_user[std::make_pair(usr.cell->name, usr.port)] = i;
             }
         }
     }
@@ -1147,13 +1117,13 @@ class SAPlacer
     // Simple routeability driven placement
     const int large_cell_thresh = 50;
     int total_net_share = 0;
-    std::vector<std::vector<std::unordered_map<IdString, int>>> nets_by_tile;
+    std::vector<std::vector<dict<IdString, int>>> nets_by_tile;
     void setup_nets_by_tile()
     {
         total_net_share = 0;
-        nets_by_tile.resize(max_x + 1, std::vector<std::unordered_map<IdString, int>>(max_y + 1));
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        nets_by_tile.resize(max_x + 1, std::vector<dict<IdString, int>>(max_y + 1));
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (int(ci->ports.size()) > large_cell_thresh)
                 continue;
             Loc loc = ctx->getBelLocation(ci->bel);
@@ -1211,7 +1181,7 @@ class SAPlacer
     std::vector<std::vector<double>> net_arc_tcost;
 
     // Fast lookup for cell port to net user index
-    std::unordered_map<const PortInfo *, size_t> fast_port_to_user;
+    dict<std::pair<IdString, IdString>, size_t> fast_port_to_user;
 
     // Wirelength and timing cost at last and current iteration
     wirelen_t last_wirelen_cost, curr_wirelen_cost;
@@ -1224,10 +1194,10 @@ class SAPlacer
     bool improved = false;
     int n_move, n_accept;
     int diameter = 35, max_x = 1, max_y = 1;
-    std::unordered_map<IdString, std::tuple<int, int>> bel_types;
-    std::unordered_map<IdString, BoundingBox> region_bounds;
+    dict<IdString, std::tuple<int, int>> bel_types;
+    dict<IdString, BoundingBox> region_bounds;
     FastBels fast_bels;
-    std::unordered_set<BelId> locked_bels;
+    pool<BelId> locked_bels;
     std::vector<NetInfo *> net_by_udata;
     std::vector<decltype(NetInfo::udata)> old_udata;
     bool require_legal = true;

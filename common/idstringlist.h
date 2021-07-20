@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -22,6 +22,7 @@
 #define IDSTRING_LIST_H
 
 #include <boost/functional/hash.hpp>
+#include "hashlib.h"
 #include "idstring.h"
 #include "nextpnr_namespaces.h"
 #include "sso_array.h"
@@ -34,7 +35,7 @@ struct IdStringList
 {
     SSOArray<IdString, 4> ids;
 
-    IdStringList(){};
+    IdStringList() : ids(1, IdString()){};
     explicit IdStringList(size_t n) : ids(n, IdString()){};
     explicit IdStringList(IdString id) : ids(1, id){};
     template <typename Tlist> explicit IdStringList(const Tlist &list) : ids(list){};
@@ -64,22 +65,19 @@ struct IdStringList
         }
         return false;
     }
+
+    static IdStringList concat(IdStringList a, IdStringList b);
+    IdStringList slice(size_t s, size_t e) const;
+
+    unsigned int hash() const
+    {
+        unsigned int h = mkhash_init;
+        for (const auto &val : ids)
+            h = mkhash(h, val.hash());
+        return h;
+    }
 };
 
 NEXTPNR_NAMESPACE_END
-
-namespace std {
-template <> struct hash<NEXTPNR_NAMESPACE_PREFIX IdStringList>
-{
-    std::size_t operator()(const NEXTPNR_NAMESPACE_PREFIX IdStringList &obj) const noexcept
-    {
-        std::size_t seed = 0;
-        boost::hash_combine(seed, hash<size_t>()(obj.size()));
-        for (auto &id : obj)
-            boost::hash_combine(seed, hash<NEXTPNR_NAMESPACE_PREFIX IdString>()(id));
-        return seed;
-    }
-};
-} // namespace std
 
 #endif /* IDSTRING_LIST_H */

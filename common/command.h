@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -37,12 +37,12 @@ class CommandHandler
     virtual ~CommandHandler(){};
 
     int exec();
-    std::unique_ptr<Context> load_json(std::string filename);
+    void load_json(Context *ctx, std::string filename);
     void clear();
 
   protected:
     virtual void setupArchContext(Context *ctx) = 0;
-    virtual std::unique_ptr<Context> createContext(std::unordered_map<std::string, Property> &values) = 0;
+    virtual std::unique_ptr<Context> createContext(dict<std::string, Property> &values) = 0;
     virtual po::options_description getArchOptions() = 0;
     virtual void validate(){};
     virtual void customAfterLoad(Context *ctx){};

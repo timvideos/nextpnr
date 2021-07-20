@@ -44,7 +44,7 @@ void PseudoPipData::init_tile_type(const Context *ctx, int32_t tile_type)
             max_pseudo_pip_index = pip_idx;
         }
 
-        HashTables::HashSet<size_t> sites;
+        pool<size_t> sites;
         std::vector<PseudoPipBel> pseudo_pip_bels;
         for (int32_t wire_index : pip_data.pseudo_cell_wires) {
             const TileWireInfoPOD &wire_data = type_data.wire_data[wire_index];
@@ -63,8 +63,6 @@ void PseudoPipData::init_tile_type(const Context *ctx, int32_t tile_type)
 
             sites.emplace(wire_data.site);
 
-            int32_t driver_bel = -1;
-            int32_t output_pin = -1;
             for (const BelPortPOD &bel_pin : wire_data.bel_pins) {
                 const BelInfoPOD &bel_data = type_data.bel_data[bel_pin.bel_index];
                 if (bel_data.synthetic != NOT_SYNTH) {
@@ -92,18 +90,9 @@ void PseudoPipData::init_tile_type(const Context *ctx, int32_t tile_type)
                     continue;
                 }
 
-                // Each site wire should have 1 driver!
-                NPNR_ASSERT(driver_bel == -1);
-                driver_bel = bel_pin.bel_index;
-                output_pin = bel_pin_idx;
-            }
-
-            if (driver_bel != -1) {
-                NPNR_ASSERT(output_pin != -1);
                 PseudoPipBel bel;
-                bel.bel_index = driver_bel;
-                bel.output_bel_pin = output_pin;
-
+                bel.bel_index = bel_pin.bel_index;
+                bel.output_bel_pin = bel_pin_idx;
                 pseudo_pip_bels.push_back(bel);
             }
         }
@@ -122,7 +111,7 @@ void PseudoPipData::init_tile_type(const Context *ctx, int32_t tile_type)
         }
 
         if (!pseudo_pip_bels.empty()) {
-            HashTables::HashSet<int32_t> pseudo_cell_wires;
+            pool<int32_t> pseudo_cell_wires;
             pseudo_cell_wires.insert(pip_data.pseudo_cell_wires.begin(), pip_data.pseudo_cell_wires.end());
 
             // For each BEL, find the input bel pin used, and attach it to
@@ -195,7 +184,7 @@ void PseudoPipModel::prepare_for_routing(const Context *ctx, const std::vector<S
 {
     // First determine which sites have placed cells, these sites are consider
     // active.
-    HashTables::HashSet<size_t> active_sites;
+    pool<size_t> active_sites;
     for (size_t site = 0; site < sites.size(); ++site) {
         if (!sites[site].cells_in_site.empty()) {
             active_sites.emplace(site);
@@ -309,7 +298,7 @@ void PseudoPipModel::update_site(const Context *ctx, size_t site)
     unused_pseudo_pips.clear();
     unused_pseudo_pips.reserve(pseudo_pips_for_site.size());
 
-    HashTables::HashMap<int32_t, PseudoPipBel> used_bels;
+    dict<int32_t, PseudoPipBel> used_bels;
     for (int32_t pseudo_pip : pseudo_pips_for_site) {
         if (!active_pseudo_pips.count(pseudo_pip)) {
             unused_pseudo_pips.push_back(pseudo_pip);
@@ -353,6 +342,37 @@ void PseudoPipModel::update_site(const Context *ctx, size_t site)
         }
     }
 
+    std::vector<CellInfo> lut_thru_cells;
+    lut_thru_cells.reserve(tile_status.sites[site].lut_thrus.size());
+    for (auto input_bel_pin : tile_status.sites[site].lut_thrus) {
+        if (ctx->wire_lut == nullptr)
+            break;
+
+        BelId bel;
+        bel.index = input_bel_pin.second;
+        bel.tile = tile;
+        const auto &bel_data = bel_info(ctx->chip_info, bel);
+
+        NPNR_ASSERT(bel_data.lut_element != -1);
+
+        lut_thru_cells.emplace_back();
+        CellInfo &cell = lut_thru_cells.back();
+
+        cell.bel = bel;
+
+        cell.type = IdString(ctx->wire_lut->cell);
+        NPNR_ASSERT(ctx->wire_lut->input_pins.size() == 1);
+        cell.lut_cell.pins.push_back(IdString(ctx->wire_lut->input_pins[0]));
+
+        cell.lut_cell.equation.resize(2);
+        cell.lut_cell.equation.set(0, false);
+        cell.lut_cell.equation.set(1, true);
+
+        cell.cell_bel_pins[IdString(ctx->wire_lut->input_pins[0])].push_back(input_bel_pin.first);
+
+        lut_mappers[bel_data.lut_element].cells.push_back(&cell);
+    }
+
     std::vector<CellInfo> lut_cells;
     lut_cells.reserve(used_bels.size());
     for (const auto &bel_pair : used_bels) {
@@ -370,9 +390,8 @@ void PseudoPipModel::update_site(const Context *ctx, size_t site)
         cell.bel.tile = tile;
         cell.bel.index = bel_pair.first;
 
-        if (ctx->wire_lut == nullptr) {
+        if (ctx->wire_lut == nullptr)
             continue;
-        }
 
         cell.type = IdString(ctx->wire_lut->cell);
         NPNR_ASSERT(ctx->wire_lut->input_pins.size() == 1);
@@ -437,11 +456,6 @@ void PseudoPipModel::update_site(const Context *ctx, size_t site)
             }
         }
 
-        if (blocked_by_bel) {
-            allowed_pseudo_pips.set(pseudo_pip, false);
-            continue;
-        }
-
         bool blocked_by_lut_eq = false;
 
         // See if any BELs are part of a LUT element.  If so, see if using
@@ -480,20 +494,17 @@ void PseudoPipModel::update_site(const Context *ctx, size_t site)
             }
         }
 
-        if (blocked_by_lut_eq) {
 #ifdef DEBUG_PSEUDO_PIP
-            if (ctx->verbose) {
-                log_info("Pseudo pip %s is blocked by lut eq\n", ctx->nameOfPip(pip));
-            }
-#endif
-            allowed_pseudo_pips.set(pseudo_pip, false);
-            continue;
+        if (blocked_by_lut_eq && ctx->verbose) {
+            log_info("Pseudo pip %s is blocked by invalid LUT equation\n", ctx->nameOfPip(pip));
         }
+#endif
 
         // Pseudo pip should be allowed, mark as such.
         //
         // FIXME: Handle non-LUT constraint cases, as needed.
-        allowed_pseudo_pips.set(pseudo_pip, true);
+        bool allow_pip = !blocked_by_lut_eq && !blocked_by_bel;
+        allowed_pseudo_pips.set(pseudo_pip, allow_pip);
     }
 }
 

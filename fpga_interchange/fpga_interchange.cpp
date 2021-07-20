@@ -43,7 +43,7 @@ static void write_message(::capnp::MallocMessageBuilder & message, const std::st
 
 struct StringEnumerator {
     std::vector<std::string> strings;
-    std::unordered_map<std::string, size_t> string_to_index;
+    dict<std::string, size_t> string_to_index;
 
     size_t get_index(const std::string &s) {
         auto result = string_to_index.emplace(s, strings.size());
@@ -59,7 +59,7 @@ struct StringEnumerator {
 static PhysicalNetlist::PhysNetlist::RouteBranch::Builder emit_branch(
         const Context * ctx,
         StringEnumerator * strings,
-        const std::unordered_map<PipId, PlaceStrength> &pip_place_strength,
+        const dict<PipId, PlaceStrength> &pip_place_strength,
         PipId pip,
         PhysicalNetlist::PhysNetlist::RouteBranch::Builder branch) {
     if(ctx->is_pip_synthetic(pip)) {
@@ -90,6 +90,25 @@ static PhysicalNetlist::PhysNetlist::RouteBranch::Builder emit_branch(
         pip_obj.setWire1(strings->get_index(dst_wire_name.str(ctx)));
         pip_obj.setForward(true);
         pip_obj.setIsFixed(pip_place_strength.at(pip) >= STRENGTH_FIXED);
+
+        // If this is a pseudo PIP, get its name
+        if (pip_data.pseudo_cell_wires.size() != 0) {
+            for (int32_t wire_index : pip_data.pseudo_cell_wires) {
+                const TileWireInfoPOD &wire_data = tile_type.wire_data[wire_index];
+
+                if (wire_data.site == -1) {
+                    continue;
+                }
+
+                const SiteInstInfoPOD & site_data = site_inst_info(ctx->chip_info, pip.tile, wire_data.site);
+                std::string site_name = site_data.site_name.get();
+                int site_idx = strings->get_index(site_name);
+                pip_obj.setSite(site_idx);
+
+                // It is assumed that a pseudo PIP traverses one site only
+                break;
+            }
+        }
 
         return branch;
     } else {
@@ -245,10 +264,10 @@ static void init_bel_pin(
 static void emit_net(
         const Context * ctx,
         StringEnumerator * strings,
-        const std::unordered_map<WireId, std::vector<PipId>> &pip_downhill,
-        const std::unordered_map<WireId, std::vector<BelPin>> &sinks,
-        std::unordered_set<PipId> *pips,
-        const std::unordered_map<PipId, PlaceStrength> &pip_place_strength,
+        const dict<WireId, std::vector<PipId>> &pip_downhill,
+        const dict<WireId, std::vector<BelPin>> &sinks,
+        pool<PipId> *pips,
+        const dict<PipId, PlaceStrength> &pip_place_strength,
         WireId wire, PhysicalNetlist::PhysNetlist::RouteBranch::Builder branch) {
     size_t number_branches = 0;
 
@@ -294,6 +313,11 @@ static void emit_net(
 // FIXME: Consider making sure that wire_data.bel_pins[0] is always the
 // source BEL pin in the BBA generator.
 static BelPin find_source(const Context *ctx, WireId source_wire) {
+    if (source_wire.tile == -1) {
+        // Nodal wire, probably a constant, cannot have an associated bel pin
+        return BelPin();
+    }
+
     const TileTypeInfoPOD & tile_type = loc_info(ctx->chip_info, source_wire);
     const TileWireInfoPOD & wire_data = tile_type.wire_data[source_wire.index];
 
@@ -330,7 +354,7 @@ static PhysicalNetlist::PhysNetlist::RouteBranch::Builder init_local_source(
         StringEnumerator * strings,
         PhysicalNetlist::PhysNetlist::RouteBranch::Builder source_branch,
         PipId root,
-        const std::unordered_map<PipId, PlaceStrength> &pip_place_strength,
+        const dict<PipId, PlaceStrength> &pip_place_strength,
         WireId *root_wire) {
     WireId source_wire = ctx->getPipSrcWire(root);
     BelPin source_bel_pin = find_source(ctx, source_wire);
@@ -346,7 +370,7 @@ static PhysicalNetlist::PhysNetlist::RouteBranch::Builder init_local_source(
 }
 
 static void find_non_synthetic_edges(const Context * ctx, WireId root_wire,
-        const std::unordered_map<WireId, std::vector<PipId>> &pip_downhill,
+        const dict<WireId, std::vector<PipId>> &pip_downhill,
         std::vector<PipId> *root_pips) {
     std::vector<WireId> wires_to_expand;
 
@@ -384,7 +408,7 @@ void FpgaInterchange::write_physical_netlist(const Context * ctx, const std::str
 
     phys_netlist.setPart(ctx->get_part());
 
-    std::unordered_set<IdString> placed_cells;
+    pool<IdString> placed_cells;
     for(const auto & cell_pair : ctx->cells) {
         const CellInfo & cell = *cell_pair.second;
         if(cell.bel == BelId()) {
@@ -425,7 +449,7 @@ void FpgaInterchange::write_physical_netlist(const Context * ctx, const std::str
 
     std::vector<IdString> ports;
 
-    std::unordered_map<std::string, std::string> sites;
+    dict<std::string, std::string> sites;
     auto placements = phys_netlist.initPlacements(number_placements);
     auto placement_iter = placements.begin();
 
@@ -516,20 +540,35 @@ void FpgaInterchange::write_physical_netlist(const Context * ctx, const std::str
         phys_cell.setPhysType(PhysicalNetlist::PhysNetlist::PhysCellType::PORT);
     }
 
-    auto nets = phys_netlist.initPhysNets(ctx->nets.size());
+    int nets_to_remove = 0;
+    for(auto & net_pair : ctx->nets) {
+        auto &net = *net_pair.second;
+
+        // Remove disconnected nets that do not have any users
+        auto net_name = std::string(net.name.c_str(ctx));
+        if (net.users.empty() && net_name.rfind("$frontend$", 0) == 0)
+            nets_to_remove++;
+    }
+
+    auto nets = phys_netlist.initPhysNets(ctx->nets.size() - nets_to_remove);
     auto net_iter = nets.begin();
     for(auto & net_pair : ctx->nets) {
         auto &net = *net_pair.second;
-        auto net_out = *net_iter++;
+
+        auto net_name = std::string(net.name.c_str(ctx));
+        if (net.users.empty() && net_name.rfind("$frontend$", 0) == 0)
+            continue;
 
         const CellInfo *driver_cell = net.driver.cell;
 
+        auto net_out = *net_iter++;
+
         // Handle GND and VCC nets.
-        if(driver_cell->bel == ctx->get_gnd_bel()) {
+        if(driver_cell != nullptr && driver_cell->bel == ctx->get_gnd_bel()) {
             IdString gnd_net_name(ctx->chip_info->constants->gnd_net_name);
             net_out.setName(strings.get_index(gnd_net_name.str(ctx)));
             net_out.setType(PhysicalNetlist::PhysNetlist::NetType::GND);
-        } else if(driver_cell->bel == ctx->get_vcc_bel()) {
+        } else if(driver_cell != nullptr && driver_cell->bel == ctx->get_vcc_bel()) {
             IdString vcc_net_name(ctx->chip_info->constants->vcc_net_name);
             net_out.setName(strings.get_index(vcc_net_name.str(ctx)));
             net_out.setType(PhysicalNetlist::PhysNetlist::NetType::VCC);
@@ -537,9 +576,9 @@ void FpgaInterchange::write_physical_netlist(const Context * ctx, const std::str
             net_out.setName(strings.get_index(net.name.str(ctx)));
         }
 
-        std::unordered_map<WireId, BelPin> root_wires;
-        std::unordered_map<WireId, std::vector<PipId>> pip_downhill;
-        std::unordered_set<PipId> pips;
+        dict<WireId, BelPin> root_wires;
+        dict<WireId, std::vector<PipId>> pip_downhill;
+        pool<PipId> pips;
 
         if (driver_cell != nullptr && driver_cell->bel != BelId() && ctx->isBelLocationValid(driver_cell->bel)) {
             for(IdString bel_pin_name : driver_cell->cell_bel_pins.at(net.driver.port)) {
@@ -554,7 +593,7 @@ void FpgaInterchange::write_physical_netlist(const Context * ctx, const std::str
             }
         }
 
-        std::unordered_map<WireId, std::vector<BelPin>> sinks;
+        dict<WireId, std::vector<BelPin>> sinks;
         for(const auto &port_ref : net.users) {
             if(port_ref.cell != nullptr && port_ref.cell->bel != BelId() && ctx->isBelLocationValid(port_ref.cell->bel)) {
                 auto pin_iter = port_ref.cell->cell_bel_pins.find(port_ref.port);
@@ -579,7 +618,7 @@ void FpgaInterchange::write_physical_netlist(const Context * ctx, const std::str
             }
         }
 
-        std::unordered_map<PipId, PlaceStrength> pip_place_strength;
+        dict<PipId, PlaceStrength> pip_place_strength;
 
         for(auto &wire_pair : net.wires) {
             WireId downhill_wire = wire_pair.first;
@@ -704,22 +743,10 @@ struct PortKey {
     bool operator == (const PortKey &other) const {
         return inst_idx == other.inst_idx && port_idx == other.port_idx;
     }
-};
-
-NEXTPNR_NAMESPACE_END
-
-template <> struct std::hash<NEXTPNR_NAMESPACE_PREFIX PortKey>
-{
-    std::size_t operator()(const NEXTPNR_NAMESPACE_PREFIX PortKey &key) const noexcept
-    {
-        std::size_t seed = 0;
-        boost::hash_combine(seed, std::hash<int32_t>()(key.inst_idx));
-        boost::hash_combine(seed, std::hash<uint32_t>()(key.port_idx));
-        return seed;
+    unsigned int hash() const {
+        return mkhash(inst_idx, port_idx);
     }
 };
-
-NEXTPNR_NAMESPACE_BEGIN
 
 struct ModuleReader {
     const LogicalNetlistImpl *root;
@@ -729,9 +756,9 @@ struct ModuleReader {
     LogicalNetlist::Netlist::Cell::Reader cell;
     LogicalNetlist::Netlist::CellDeclaration::Reader cell_decl;
 
-    std::unordered_map<int32_t, LogicalNetlist::Netlist::Net::Reader> net_indicies;
-    std::unordered_map<int32_t, std::string> disconnected_nets;
-    std::unordered_map<PortKey, std::vector<int32_t>> connections;
+    dict<int32_t, LogicalNetlist::Netlist::Net::Reader> net_indicies;
+    dict<int32_t, std::string> disconnected_nets;
+    dict<PortKey, std::vector<int32_t>> connections;
 
     ModuleReader(const LogicalNetlistImpl *root,
             LogicalNetlist::Netlist::CellInstance::Reader cell_inst, bool is_top);
@@ -815,7 +842,6 @@ struct LogicalNetlistImpl
 
     template <typename TFunc> void foreach_netname(const ModuleReader &mod, TFunc Func) const
     {
-        // std::unordered_map<int32_t, LogicalNetlist::Netlist::Net::Reader> net_indicies;
         for(auto net_pair : mod.net_indicies) {
             NetReader net_reader(&mod, net_pair.first);
             auto net = net_pair.second;
@@ -823,7 +849,6 @@ struct LogicalNetlistImpl
             Func(strings.at(net.getName()), net_reader);
         }
 
-        // std::unordered_map<int32_t, IdString> disconnected_nets;
         for(auto net_pair : mod.disconnected_nets) {
             NetReader net_reader(&mod, net_pair.first);
             Func(net_pair.second, net_reader);
@@ -1065,6 +1090,14 @@ ModuleReader::ModuleReader(const LogicalNetlistImpl *root,
             if(iter == net_indicies.end()) {
                 PortKey port_key = port_connections.first;
                 auto port = ports[port_key.port_idx];
+
+                // Disconnected outputs should be marked, so to be ignored when
+                // writing the physical netlist.
+                // Skipping these nets lets the basic frontend to assign a default
+                // name that starts with $frontend$.
+                if (port.getDir() == LogicalNetlist::Netlist::Direction::OUTPUT)
+                    continue;
+
                 disconnected_nets[net_idx] = stringf("%s.%d", root->strings.at(port.getName()).c_str(), i);
             }
         }

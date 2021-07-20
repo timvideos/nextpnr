@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2019  David Shah <dave@ds0.me>
+ *  Copyright (C) 2019  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -35,7 +35,6 @@
 #include <fstream>
 #include <queue>
 
-#include "hash_table.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "router1.h"
@@ -68,6 +67,7 @@ struct Router2
         int cx, cy, hpwl;
         int total_route_us = 0;
         float max_crit = 0;
+        int fail_count = 0;
     };
 
     struct WireScore
@@ -130,8 +130,8 @@ struct Router2
         nets.resize(ctx->nets.size());
         nets_by_udata.resize(ctx->nets.size());
         size_t i = 0;
-        for (auto net : sorted(ctx->nets)) {
-            NetInfo *ni = net.second;
+        for (auto &net : ctx->nets) {
+            NetInfo *ni = net.second.get();
             ni->udata = i;
             nets_by_udata.at(i) = ni;
             nets.at(i).arcs.resize(ni->users.size());
@@ -174,7 +174,7 @@ struct Router2
                     nets.at(i).bb.x0 = std::min(nets.at(i).bb.x0, ad.bb.x0);
                     nets.at(i).bb.x1 = std::max(nets.at(i).bb.x1, ad.bb.x1);
                     nets.at(i).bb.y0 = std::min(nets.at(i).bb.y0, ad.bb.y0);
-                    nets.at(i).bb.y1 = std::max(nets.at(i).bb.x1, ad.bb.y1);
+                    nets.at(i).bb.y1 = std::max(nets.at(i).bb.y1, ad.bb.y1);
                 }
                 // Add location to centroid sum
                 Loc usr_loc = ctx->getBelLocation(usr.cell->bel);
@@ -189,11 +189,15 @@ struct Router2
                 log_info("%s: bb=(%d, %d)->(%d, %d) c=(%d, %d) hpwl=%d\n", ctx->nameOf(ni), nets.at(i).bb.x0,
                          nets.at(i).bb.y0, nets.at(i).bb.x1, nets.at(i).bb.y1, nets.at(i).cx, nets.at(i).cy,
                          nets.at(i).hpwl);
+            nets.at(i).bb.x0 = std::max(nets.at(i).bb.x0 - cfg.bb_margin_x, 0);
+            nets.at(i).bb.y0 = std::max(nets.at(i).bb.y0 - cfg.bb_margin_y, 0);
+            nets.at(i).bb.x1 = std::min(nets.at(i).bb.x1 + cfg.bb_margin_x, ctx->getGridDimX());
+            nets.at(i).bb.y1 = std::min(nets.at(i).bb.y1 + cfg.bb_margin_y, ctx->getGridDimY());
             i++;
         }
     }
 
-    HashTables::HashMap<WireId, int> wire_to_idx;
+    dict<WireId, int> wire_to_idx;
     std::vector<PerWireData> flat_wires;
 
     PerWireData &wire_data(WireId w) { return flat_wires[wire_to_idx.at(w)]; }
@@ -226,8 +230,8 @@ struct Router2
             flat_wires.push_back(pwd);
         }
 
-        for (auto net_pair : sorted(ctx->nets)) {
-            auto *net = net_pair.second;
+        for (auto &net_pair : ctx->nets) {
+            auto *net = net_pair.second.get();
             auto &nd = nets.at(net->udata);
             for (size_t usr = 0; usr < net->users.size(); usr++) {
                 auto &ad = nd.arcs.at(usr);
@@ -264,11 +268,7 @@ struct Router2
         };
     };
 
-    bool hit_test_pip(ArcBounds &bb, Loc l)
-    {
-        return l.x >= (bb.x0 - cfg.bb_margin_x) && l.x <= (bb.x1 + cfg.bb_margin_x) &&
-               l.y >= (bb.y0 - cfg.bb_margin_y) && l.y <= (bb.y1 + cfg.bb_margin_y);
-    }
+    bool hit_test_pip(ArcBounds &bb, Loc l) { return l.x >= bb.x0 && l.x <= bb.x1 && l.y >= bb.y0 && l.y <= bb.y1; }
 
     double curr_cong_weight, hist_cong_weight, estimate_weight;
 
@@ -283,7 +283,7 @@ struct Router2
 
         std::priority_queue<QueuedWire, std::vector<QueuedWire>, QueuedWire::Greater> queue;
         // Special case where one net has multiple logical arcs to the same physical sink
-        std::unordered_set<WireId> processed_sinks;
+        pool<WireId> processed_sinks;
 
         // Backwards routing
         std::queue<int> backwards_queue;
@@ -433,23 +433,38 @@ struct Router2
     }
 
     // Returns true if a wire contains no source ports or driving pips
-    bool is_wire_undriveable(WireId wire)
+    bool is_wire_undriveable(WireId wire, const NetInfo *net, int iter_count = 0)
     {
+        // This is specifically designed to handle a particularly icky case that the current router struggles with in
+        // the nexus device,
+        // C -> C lut input only
+        // C; D; or F from another lut -> D lut input
+        // D or M -> M ff input
+        // without careful reservation of C for C lut input and D for D lut input, there is fighting for D between FF
+        // and LUT
+        if (iter_count > 7)
+            return false; // heuristic to assume we've hit general routing
+        if (wire_data(wire).reserved_net != -1 && wire_data(wire).reserved_net != net->udata)
+            return true; // reserved for another net
         for (auto bp : ctx->getWireBelPins(wire))
-            if (ctx->getBelPinType(bp.bel, bp.pin) != PORT_IN)
+            if ((net->driver.cell == nullptr || bp.bel == net->driver.cell->bel) &&
+                ctx->getBelPinType(bp.bel, bp.pin) != PORT_IN)
                 return false;
         for (auto p : ctx->getPipsUphill(wire))
-            if (ctx->checkPipAvail(p))
-                return false;
+            if (ctx->checkPipAvail(p)) {
+                if (!is_wire_undriveable(ctx->getPipSrcWire(p), net, iter_count + 1))
+                    return false;
+            }
         return true;
     }
 
     // Find all the wires that must be used to route a given arc
-    void reserve_wires_for_arc(NetInfo *net, size_t i)
+    bool reserve_wires_for_arc(NetInfo *net, size_t i)
     {
+        bool did_something = false;
         WireId src = ctx->getNetinfoSourceWire(net);
         for (auto sink : ctx->getNetinfoSinkWires(net, net->users.at(i))) {
-            std::unordered_set<WireId> rsv;
+            pool<WireId> rsv;
             WireId cursor = sink;
             bool done = false;
             if (ctx->debug)
@@ -458,13 +473,14 @@ struct Router2
                 auto &wd = wire_data(cursor);
                 if (ctx->debug)
                     log("      %s\n", ctx->nameOfWire(cursor));
+                did_something |= (wd.reserved_net != net->udata);
                 wd.reserved_net = net->udata;
                 if (cursor == src)
                     break;
                 WireId next_cursor;
                 for (auto uh : ctx->getPipsUphill(cursor)) {
                     WireId w = ctx->getPipSrcWire(uh);
-                    if (is_wire_undriveable(w))
+                    if (is_wire_undriveable(w, net))
                         continue;
                     if (next_cursor != WireId()) {
                         done = true;
@@ -477,17 +493,23 @@ struct Router2
                 cursor = next_cursor;
             }
         }
+        return did_something;
     }
 
     void find_all_reserved_wires()
     {
-        for (auto net : nets_by_udata) {
-            WireId src = ctx->getNetinfoSourceWire(net);
-            if (src == WireId())
-                continue;
-            for (size_t i = 0; i < net->users.size(); i++)
-                reserve_wires_for_arc(net, i);
-        }
+        // Run iteratively, as reserving wires for one net might limit choices for another
+        bool did_something = false;
+        do {
+            did_something = false;
+            for (auto net : nets_by_udata) {
+                WireId src = ctx->getNetinfoSourceWire(net);
+                if (src == WireId())
+                    continue;
+                for (size_t i = 0; i < net->users.size(); i++)
+                    did_something |= reserve_wires_for_arc(net, i);
+            }
+        } while (did_something);
     }
 
     void reset_wires(ThreadContext &t)
@@ -684,13 +706,15 @@ struct Router2
                 if (is_bb && !hit_test_pip(ad.bb, ctx->getPipLocation(dh)) && wire_intent != ID_PSEUDO_GND && wire_intent != ID_PSEUDO_VCC)
                     continue;
 #else
-                if (is_bb && !hit_test_pip(ad.bb, ctx->getPipLocation(dh)))
+                if (is_bb && !hit_test_pip(nd.bb, ctx->getPipLocation(dh)))
                     continue;
                 if (!ctx->checkPipAvailForNet(dh, net)) {
+#if 0
                     ROUTE_LOG_DBG("Skipping pip %s because it is bound to net '%s' not net '%s'\n", ctx->nameOfPip(dh),
                                   ctx->getBoundPipNet(dh) != nullptr ? ctx->getBoundPipNet(dh)->name.c_str(ctx)
                                                                      : "<not a net>",
                                   net->name.c_str(ctx));
+#endif
                     continue;
                 }
 #endif
@@ -719,6 +743,7 @@ struct Router2
                 next_score.delay =
                         curr.score.delay + ctx->getPipDelay(dh).maxDelay() + ctx->getWireDelay(next).maxDelay();
                 next_score.togo_cost = cfg.estimate_weight * get_togo_cost(net, i, next_idx, dst_wire, &forward);
+#if 0
                 ROUTE_LOG_DBG(
                         "src_wire = %s -> next %s -> dst_wire = %s (backward: %s, forward: %s, sum: %s, cost = %f, "
                         "togo_cost = %f, total = %f), dt = %02fs\n",
@@ -727,6 +752,7 @@ struct Router2
                         std::to_string(next_score.delay + forward).c_str(), next_score.cost, next_score.togo_cost,
                         next_score.cost + next_score.togo_cost,
                         std::chrono::duration<float>(std::chrono::high_resolution_clock::now() - arc_start).count());
+#endif
                 const auto &v = nwd.visit;
                 if (!v.visited || (v.score.total() > next_score.total())) {
                     ++explored;
@@ -808,7 +834,6 @@ struct Router2
                 // Ripup failed arcs to start with
                 // Check if arc is already legally routed
                 if (check_arc_routing(net, i, j)) {
-                    ROUTE_LOG_DBG("Arc '%s' (user %zu, arc %zu) already routed skipping.\n", ctx->nameOf(net), i, j);
                     continue;
                 }
 
@@ -831,10 +856,20 @@ struct Router2
                                   int(a.first), int(a.second), ctx->nameOf(net));
                     auto res2 = route_arc(t, net, a.first, a.second, is_mt, false);
                     // If this also fails, no choice but to give up
-                    if (res2 != ARC_SUCCESS)
+                    if (res2 != ARC_SUCCESS) {
+                        if (ctx->debug) {
+                            log_info("Pre-bound routing: \n");
+                            for (auto &wire_pair : net->wires) {
+                                log("        %s", ctx->nameOfWire(wire_pair.first));
+                                if (wire_pair.second.pip != PipId())
+                                    log(" %s", ctx->nameOfPip(wire_pair.second.pip));
+                                log("\n");
+                            }
+                        }
                         log_error("Failed to route arc %d.%d of net '%s', from %s to %s.\n", int(a.first),
                                   int(a.second), ctx->nameOf(net), ctx->nameOfWire(ctx->getNetinfoSourceWire(net)),
                                   ctx->nameOfWire(ctx->getNetinfoSinkWire(net, net->users.at(a.first), a.second)));
+                    }
                 }
             }
         }
@@ -868,6 +903,21 @@ struct Router2
                 overused_wires += 1;
                 for (auto &bound : wire.bound_nets)
                     failed_nets.insert(bound.first);
+            }
+        }
+        for (int n : failed_nets) {
+            auto &net_data = nets.at(n);
+            ++net_data.fail_count;
+            if ((net_data.fail_count % 3) == 0) {
+                // Every three times a net fails to route, expand the bounding box to increase the search space
+#ifndef ARCH_MISTRAL
+                // This patch seems to make thing worse for CycloneV, as it slows down the resolution of TD congestion,
+                // disable it
+                net_data.bb.x0 = std::max(net_data.bb.x0 - 1, 0);
+                net_data.bb.y0 = std::max(net_data.bb.y0 - 1, 0);
+                net_data.bb.x1 = std::min(net_data.bb.x1 + 1, ctx->getGridDimX());
+                net_data.bb.y1 = std::min(net_data.bb.y1 + 1, ctx->getGridDimY());
+#endif
             }
         }
     }
@@ -928,17 +978,17 @@ struct Router2
                 log_error("Internal error; incomplete route tree for arc %d of net %s.\n", usr_idx, ctx->nameOf(net));
             }
             auto &p = wd.bound_nets.at(net->udata).second;
-            if (!ctx->checkPipAvail(p)) {
+            if (ctx->checkPipAvailForNet(p, net)) {
                 NetInfo *bound_net = ctx->getBoundPipNet(p);
-                if (bound_net != net) {
-                    if (ctx->verbose) {
-                        log_info("Failed to bind pip %s to net %s\n", ctx->nameOfPip(p), net->name.c_str(ctx));
-                    }
-                    success = false;
-                    break;
+                if (bound_net == nullptr) {
+                    to_bind.push_back(p);
                 }
             } else {
-                to_bind.push_back(p);
+                if (ctx->verbose) {
+                    log_info("Failed to bind pip %s to net %s\n", ctx->nameOfPip(p), net->name.c_str(ctx));
+                }
+                success = false;
+                break;
             }
             cursor = ctx->getPipSrcWire(p);
         }
@@ -1002,7 +1052,7 @@ struct Router2
         return success;
     }
 
-    void write_heatmap(std::ostream &out, bool congestion = false)
+    void write_xy_heatmap(std::ostream &out, bool congestion = false)
     {
         std::vector<std::vector<int>> hm_xy;
         int max_x = 0, max_y = 0;
@@ -1039,6 +1089,33 @@ struct Router2
             out << std::endl;
         }
     }
+
+    void write_wiretype_heatmap(std::ostream &out)
+    {
+        dict<IdString, std::vector<int>> cong_by_type;
+        size_t max_cong = 0;
+        // Build histogram
+        for (auto &wd : flat_wires) {
+            size_t val = wd.bound_nets.size();
+            IdString type = ctx->getWireType(wd.w);
+            max_cong = std::max(max_cong, val);
+            if (cong_by_type[type].size() <= max_cong)
+                cong_by_type[type].resize(max_cong + 1);
+            cong_by_type[type].at(val) += 1;
+        }
+        // Write csv
+        out << "type,";
+        for (size_t i = 0; i <= max_cong; i++)
+            out << "bound=" << i << ",";
+        out << std::endl;
+        for (auto &ty : cong_by_type) {
+            out << ctx->nameOf(ty.first) << ",";
+            for (int count : ty.second)
+                out << count << ",";
+            out << std::endl;
+        }
+    }
+
     int mid_x = 0, mid_y = 0;
 
     void partition_nets()
@@ -1113,10 +1190,10 @@ struct Router2
         for (auto &th : tcs) {
             th.rng.rngseed(ctx->rng64());
         }
-        int le_x = mid_x - cfg.bb_margin_x;
-        int rs_x = mid_x + cfg.bb_margin_x;
-        int le_y = mid_y - cfg.bb_margin_y;
-        int rs_y = mid_y + cfg.bb_margin_y;
+        int le_x = mid_x;
+        int rs_x = mid_x;
+        int le_y = mid_y;
+        int rs_y = mid_y;
         // Set up thread bounding boxes
         tcs.at(0).bb = ArcBounds(0, 0, mid_x, mid_y);
         tcs.at(1).bb = ArcBounds(mid_x + 1, 0, std::numeric_limits<int>::max(), le_y);
@@ -1206,6 +1283,37 @@ struct Router2
                 route_net(tcs.at(N), fail, false);
     }
 
+    //#define ROUTER2_STATISTICS
+
+    void dump_statistics()
+    {
+#ifdef ROUTER2_STATISTICS
+        int total_wires = int(flat_wires.size());
+        int have_hist_cong = 0;
+        int have_any_bound = 0, have_1_bound = 0, have_2_bound = 0, have_gte3_bound = 0;
+        for (auto &wire : flat_wires) {
+            int bound = wire.bound_nets.size();
+            if (bound != 0)
+                ++have_any_bound;
+            if (bound == 1)
+                ++have_1_bound;
+            else if (bound == 2)
+                ++have_2_bound;
+            else if (bound >= 3)
+                ++have_gte3_bound;
+            if (wire.hist_cong_cost > 1.0)
+                ++have_hist_cong;
+        }
+        log_info("Out of %d wires:\n", total_wires);
+        log_info("     %d (%.02f%%) have any bound nets\n", have_any_bound, (100.0 * have_any_bound) / total_wires);
+        log_info("     %d (%.02f%%) have 1 bound net\n", have_1_bound, (100.0 * have_1_bound) / total_wires);
+        log_info("     %d (%.02f%%) have 2 bound nets\n", have_2_bound, (100.0 * have_2_bound) / total_wires);
+        log_info("     %d (%.02f%%) have >2 bound nets\n", have_gte3_bound, (100.0 * have_gte3_bound) / total_wires);
+        log_info("     %d (%.02f%%) have historical congestion\n", have_hist_cong,
+                 (100.0 * have_hist_cong) / total_wires);
+#endif
+    }
+
     void operator()()
     {
         log_info("Running router2...\n");
@@ -1260,9 +1368,19 @@ struct Router2
 #if 0
             if (iter == 1 && ctx->debug) {
                 std::ofstream cong_map("cong_map_0.csv");
-                write_heatmap(cong_map, true);
+                write_xy_heatmap(cong_map, true);
             }
 #endif
+            if (!cfg.heatmap.empty()) {
+                std::string filename(cfg.heatmap + "_" + std::to_string(iter) + ".csv");
+                std::ofstream cong_map(filename);
+                if (!cong_map)
+                    log_error("Failed to open wiretype heatmap %s for writing.\n", filename.c_str());
+                write_wiretype_heatmap(cong_map);
+                log_info("        wrote wiretype heatmap to %s.\n", filename.c_str());
+            }
+            dump_statistics();
+
             if (overused_wires == 0) {
                 // Try and actually bind nextpnr Arch API wires
                 bind_and_check_all();
@@ -1320,6 +1438,10 @@ Router2Cfg::Router2Cfg(Context *ctx)
     curr_cong_mult = ctx->setting<float>("router2/currCongWeightMult", 2.0f);
     estimate_weight = ctx->setting<float>("router2/estimateWeight", 1.75f);
     perf_profile = ctx->setting<bool>("router2/perfProfile", false);
+    if (ctx->settings.count(ctx->id("router2/heatmap")))
+        heatmap = ctx->settings.at(ctx->id("router2/heatmap")).as_string();
+    else
+        heatmap = "";
 }
 
 NEXTPNR_NAMESPACE_END

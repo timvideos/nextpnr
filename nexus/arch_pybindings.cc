@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -46,10 +46,10 @@ void arch_wrap_python(py::module &m)
                            .def("place", &Context::place)
                            .def("route", &Context::route);
 
-    typedef std::unordered_map<IdString, std::unique_ptr<CellInfo>> CellMap;
-    typedef std::unordered_map<IdString, std::unique_ptr<NetInfo>> NetMap;
-    typedef std::unordered_map<IdString, HierarchicalCell> HierarchyMap;
-    typedef std::unordered_map<IdString, IdString> AliasMap;
+    typedef dict<IdString, std::unique_ptr<CellInfo>> CellMap;
+    typedef dict<IdString, std::unique_ptr<NetInfo>> NetMap;
+    typedef dict<IdString, HierarchicalCell> HierarchyMap;
+    typedef dict<IdString, IdString> AliasMap;
 
     typedef UpDownhillPipRange UphillPipRange;
     typedef UpDownhillPipRange DownhillPipRange;

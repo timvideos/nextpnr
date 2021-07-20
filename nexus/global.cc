@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -49,7 +49,7 @@ struct NexusGlobalRouter
         // Queue of wires to visit
         std::queue<WireId> visit;
         // Wire -> upstream pip
-        std::unordered_map<WireId, PipId> backtrace;
+        dict<WireId, PipId> backtrace;
 
         // Lookup source and destination wires
         WireId src = ctx->getNetinfoSourceWire(net);
@@ -155,8 +155,8 @@ struct NexusGlobalRouter
     void operator()()
     {
         log_info("Routing globals...\n");
-        for (auto net : sorted(ctx->nets)) {
-            NetInfo *ni = net.second;
+        for (auto &net : ctx->nets) {
+            NetInfo *ni = net.second.get();
             CellInfo *drv = ni->driver.cell;
             if (drv == nullptr)
                 continue;

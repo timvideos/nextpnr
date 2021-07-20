@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -178,10 +178,10 @@ struct FastBels
     const bool check_bel_available;
     const int minBelsForGridPick;
 
-    std::unordered_map<IdString, TypeData> cell_types;
+    dict<IdString, TypeData> cell_types;
     std::vector<std::unique_ptr<FastBelsData>> fast_bels_by_cell_type;
 
-    std::unordered_map<BelBucketId, TypeData> partition_types;
+    dict<BelBucketId, TypeData> partition_types;
     std::vector<std::unique_ptr<FastBelsData>> fast_bels_by_partition_type;
 };
 

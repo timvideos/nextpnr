@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -37,10 +37,10 @@ std::vector<CellChain> find_chains(const Context *ctx, F1 cell_type_predicate, F
 {
     std::set<IdString> chained;
     std::vector<CellChain> chains;
-    for (auto cell : sorted(ctx->cells)) {
+    for (auto &cell : ctx->cells) {
         if (chained.find(cell.first) != chained.end())
             continue;
-        CellInfo *ci = cell.second;
+        CellInfo *ci = cell.second.get();
         if (cell_type_predicate(ctx, ci)) {
             CellInfo *start = ci;
             CellInfo *prev_start = ci;

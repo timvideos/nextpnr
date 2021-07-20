@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -406,7 +406,7 @@ struct PDCParser
 
     TCLValue cmd_ldc_set_port(const std::vector<TCLValue> &arguments)
     {
-        std::unordered_map<IdString, Property> args;
+        dict<IdString, Property> args;
         for (int i = 1; i < int(arguments.size()); i++) {
             auto &arg = arguments.at(i);
             if (arg.is_string) {

@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2019  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2019  gatecat <gatecat@ds0.me>
  *  Copyright (C) 2021  William D. Jones <wjones@wdj-consulting.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -25,6 +25,16 @@
 
 NEXTPNR_NAMESPACE_BEGIN
 
+// When packing DFFs, we need context of how it's connected to a LUT to
+// properly map DFF ports to FACADE_SLICEs; DI0 input muxes F0 and OFX0,
+// and a DFF inside a slice can use either DI0 or M0 as an input.
+enum class LutType
+{
+    None,
+    Normal,
+    PassThru,
+};
+
 // Create a MachXO2 arch cell and return it
 // Name will be automatically assigned if not specified
 std::unique_ptr<CellInfo> create_machxo2_cell(Context *ctx, IdString type, std::string name = "");
@@ -46,10 +56,10 @@ void lut_to_lc(const Context *ctx, CellInfo *lut, CellInfo *lc, bool no_dff = tr
 // and reconnecting signals as necessary. If pass_thru_lut is True, the LUT will
 // be configured as pass through and D connected to I0, otherwise D will be
 // ignored
-void dff_to_lc(Context *ctx, CellInfo *dff, CellInfo *lc, bool pass_thru_lut = false);
+void dff_to_lc(Context *ctx, CellInfo *dff, CellInfo *lc, LutType lut_type = LutType::Normal);
 
 // Convert a nextpnr IO buffer to a GENERIC_IOB
-void nxio_to_iob(Context *ctx, CellInfo *nxio, CellInfo *sbio, std::unordered_set<IdString> &todelete_cells);
+void nxio_to_iob(Context *ctx, CellInfo *nxio, CellInfo *sbio, pool<IdString> &todelete_cells);
 
 NEXTPNR_NAMESPACE_END
 

@@ -34,7 +34,7 @@ NEXTPNR_NAMESPACE_BEGIN
  * kExpectedChipInfoVersion
  */
 
-static constexpr int32_t kExpectedChipInfoVersion = 7;
+static constexpr int32_t kExpectedChipInfoVersion = 13;
 
 // Flattened site indexing.
 //
@@ -182,6 +182,9 @@ NPNR_PACKED_STRUCT(struct TileInstInfoPOD {
     // as they will never be nodal
     // -1 if a tile-local wire; node index if nodal wire
     RelSlice<int32_t> tile_wire_to_node;
+
+    // Index into wire_types
+    RelSlice<int16_t> tile_wire_to_type;
 });
 
 NPNR_PACKED_STRUCT(struct TileWireRefPOD {
@@ -305,6 +308,122 @@ NPNR_PACKED_STRUCT(struct ConstantsPOD {
     RelSlice<DefaultCellConnsPOD> default_conns;
 });
 
+enum WireCategory
+{
+    WIRE_CAT_GENERAL = 0,
+    WIRE_CAT_SPECIAL = 1,
+    WIRE_CAT_GLOBAL = 2,
+};
+
+NPNR_PACKED_STRUCT(struct WireTypePOD {
+    int32_t name;     // constid
+    int32_t category; // WireCategory
+});
+
+NPNR_PACKED_STRUCT(struct GlobalCellPinPOD {
+    int32_t name;     // constid
+    int16_t max_hops; // max routing hops to try
+    int8_t guide_placement;
+    int8_t force_routing;
+});
+
+NPNR_PACKED_STRUCT(struct GlobalCellPOD {
+    int32_t cell_type;
+    RelSlice<GlobalCellPinPOD> pins;
+});
+
+NPNR_PACKED_STRUCT(struct MacroParameterPOD {
+    int32_t key;   // constid
+    int32_t value; // constid
+});
+
+enum MacroParamRuleType
+{
+    PARAM_MAP_COPY = 0,  // copy parameter value
+    PARAM_MAP_SLICE = 1, // take a slice of bits
+    PARAM_MAP_TABLE = 2, // lookup strings in table
+};
+
+NPNR_PACKED_STRUCT(struct MacroParamMapRulePOD {
+    // name of parameter on parent primitive
+    int32_t prim_param; // constid
+    // name of instance to set parameter on
+    int32_t inst_name; // constid
+    // name of parameter on macro expansion instance
+    int32_t inst_param; // constid
+    // type of mapping to use to derive new value
+    int32_t rule_type; // MacroParamRuleType
+    // for slice mappings, the bits to collect
+    RelSlice<uint32_t> slice_bits;
+    // for table mappings, the lookup table to use
+    RelSlice<MacroParameterPOD> map_table;
+});
+
+NPNR_PACKED_STRUCT(struct MacroCellInstPOD {
+    int32_t name; // instance name constid
+    int32_t type; // instance type constid
+    // parameters to set on cell
+    RelSlice<MacroParameterPOD> parameters;
+});
+
+NPNR_PACKED_STRUCT(struct MacroPortInstPOD {
+    // name of the cell instance the port is on; or 0/'' for top level ports
+    int32_t instance;
+    // name of the port
+    int32_t port;
+    // direction of the port
+    int32_t dir;
+});
+
+NPNR_PACKED_STRUCT(struct MacroNetPOD {
+    // name of the net
+    int32_t name;
+    // ports on the net
+    RelSlice<MacroPortInstPOD> ports;
+});
+
+NPNR_PACKED_STRUCT(struct MacroPOD {
+    // macro name
+    int32_t name;
+    // cell instances inside macro
+    RelSlice<MacroCellInstPOD> cell_insts;
+    // nets inside macro
+    RelSlice<MacroNetPOD> nets;
+});
+
+NPNR_PACKED_STRUCT(struct MacroExpansionPOD {
+    // primitive name to match
+    int32_t prim_name;
+    // macro name to expand to
+    int32_t macro_name;
+    // list of parameters to (optionally) match
+    RelSlice<MacroParameterPOD> param_matches;
+    // how to derive parameters for expansion instances
+    RelSlice<MacroParamMapRulePOD> param_rules;
+});
+
+NPNR_PACKED_STRUCT(struct ClusterCellPortPOD {
+    uint32_t cell;
+    uint32_t port;
+});
+
+NPNR_PACKED_STRUCT(struct ChainablePortPOD {
+    uint32_t cell_source;
+    uint32_t cell_sink;
+    uint32_t bel_source;
+    uint32_t bel_sink;
+    int16_t avg_x_offset;
+    int16_t avg_y_offset;
+});
+
+NPNR_PACKED_STRUCT(struct ClusterPOD {
+    uint32_t name;
+    RelSlice<uint32_t> root_cell_types;
+    RelSlice<ChainablePortPOD> chainable_ports;
+    RelSlice<ClusterCellPortPOD> cluster_cells_map;
+    uint32_t out_of_site_clusters;
+});
+
 NPNR_PACKED_STRUCT(struct ChipInfoPOD {
     RelPtr<char> name;
     RelPtr<char> generator;
@@ -317,6 +436,14 @@ NPNR_PACKED_STRUCT(struct ChipInfoPOD {
     RelSlice<TileInstInfoPOD> tiles;
     RelSlice<NodeInfoPOD> nodes;
     RelSlice<PackagePOD> packages;
+    RelSlice<WireTypePOD> wire_types;
+    RelSlice<GlobalCellPOD> global_cells;
+
+    // Macro related data
+    RelSlice<MacroPOD> macros;
+    RelSlice<MacroExpansionPOD> macro_rules;
+
+    RelSlice<ClusterPOD> clusters;
 
     // BEL bucket constids.
     RelSlice<int32_t> bel_buckets;
@@ -355,6 +482,11 @@ inline const PipInfoPOD &pip_info(const ChipInfoPOD *chip_info, PipId pip)
 inline const SiteInstInfoPOD &site_inst_info(const ChipInfoPOD *chip_info, int32_t tile, int32_t site)
 {
     return chip_info->sites[chip_info->tiles[tile].sites[site]];
+}
+
+inline const ClusterPOD &cluster_info(const ChipInfoPOD *chip_info, int32_t cluster)
+{
+    return chip_info->clusters[cluster];
 }
 
 enum SyntheticType

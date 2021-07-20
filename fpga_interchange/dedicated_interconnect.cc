@@ -39,6 +39,12 @@ enum WireNodeState
     IN_SOURCE_SITE = 2
 };
 
+enum ExpansionDirection
+{
+    EXPAND_DOWNHILL = 0,
+    EXPAND_UPHILL = 1
+};
+
 struct WireNode
 {
     WireId wire;
@@ -50,7 +56,51 @@ struct WireNode
 //
 // Routing networks with depth <= kMaxDepth is considers a dedicated
 // interconnect.
-constexpr int kMaxDepth = 20;
+constexpr int kMaxDepth = 6;
+
+static uint32_t get_num_pips(const Context *ctx, WireId wire, ExpansionDirection direction)
+{
+    uint32_t num_pips = 0;
+
+    if (direction == EXPAND_DOWNHILL) {
+        for (PipId pip : ctx->getPipsDownhill(wire)) {
+            auto &pip_data = pip_info(ctx->chip_info, pip);
+            if (pip_data.pseudo_cell_wires.size() > 0)
+                continue;
+
+            if (ctx->getPipDstWire(pip) == WireId())
+                continue;
+
+            if (ctx->is_pip_synthetic(pip))
+                continue;
+
+            if (ctx->is_site_port(pip))
+                continue;
+
+            num_pips++;
+        }
+    } else {
+        NPNR_ASSERT(direction == EXPAND_UPHILL);
+        for (PipId pip : ctx->getPipsUphill(wire)) {
+            auto &pip_data = pip_info(ctx->chip_info, pip);
+            if (pip_data.pseudo_cell_wires.size() > 0)
+                continue;
+
+            if (ctx->getPipSrcWire(pip) == WireId())
+                continue;
+
+            if (ctx->is_pip_synthetic(pip))
+                continue;
+
+            if (ctx->is_site_port(pip))
+                continue;
+
+            num_pips++;
+        }
+    }
+
+    return num_pips;
+}
 
 void DedicatedInterconnect::init(const Context *ctx)
 {
@@ -87,7 +137,10 @@ bool DedicatedInterconnect::check_routing(BelId src_bel, IdString src_bel_pin, B
 
     WireNode wire_node;
     wire_node.wire = src_wire;
-    wire_node.state = IN_SOURCE_SITE;
+    if (src_wire.tile == dst_wire.tile && src_wire_data.site == dst_wire_data.site)
+        wire_node.state = IN_SINK_SITE;
+    else
+        wire_node.state = IN_SOURCE_SITE;
     wire_node.depth = 0;
 
     nodes_to_expand.push_back(wire_node);
@@ -95,6 +148,16 @@ bool DedicatedInterconnect::check_routing(BelId src_bel, IdString src_bel_pin, B
     while (!nodes_to_expand.empty()) {
         WireNode node_to_expand = nodes_to_expand.back();
         nodes_to_expand.pop_back();
+
+        auto num_pips = get_num_pips(ctx, node_to_expand.wire, EXPAND_DOWNHILL);
+
+        // Usually, dedicated interconnects do not have more than one PIPs in the out-of-site
+        if (node_to_expand.depth > 1 && node_to_expand.state == IN_ROUTING && num_pips > 1) {
+            if (ctx->verbose)
+                log_info("Wire %s is on a non-dedicated path (number of pips %d)\n",
+                         ctx->nameOfWire(node_to_expand.wire), num_pips);
+            continue;
+        }
 
         for (PipId pip : ctx->getPipsDownhill(node_to_expand.wire)) {
             if (ctx->is_pip_synthetic(pip)) {
@@ -112,14 +175,14 @@ bool DedicatedInterconnect::check_routing(BelId src_bel, IdString src_bel_pin, B
 
             WireNode next_node;
             next_node.wire = wire;
-            next_node.depth = node_to_expand.depth += 1;
+            next_node.depth = node_to_expand.depth;
 
-            if (next_node.depth > kMaxDepth) {
+            if (node_to_expand.depth > kMaxDepth) {
                 // Dedicated routing should reach sources by kMaxDepth (with
                 // tuning).
                 //
                 // FIXME: Consider removing kMaxDepth and use kMaxSources?
-                return false;
+                continue;
             }
 
             auto const &wire_data = ctx->wire_info(wire);
@@ -144,7 +207,7 @@ bool DedicatedInterconnect::check_routing(BelId src_bel, IdString src_bel_pin, B
 #ifdef DEBUG_EXPANSION
                         log_info(" - Not dedicated site routing because loop!");
 #endif
-                        return false;
+                        continue;
                     }
                     next_node.state = IN_SINK_SITE;
                     break;
@@ -159,6 +222,8 @@ bool DedicatedInterconnect::check_routing(BelId src_bel, IdString src_bel_pin, B
                 }
             } else {
                 next_node.state = node_to_expand.state;
+                if (next_node.state == IN_ROUTING)
+                    next_node.depth++;
             }
 
             if (expand_node) {
@@ -356,12 +421,13 @@ bool DedicatedInterconnect::isBelLocationValid(BelId bel, const CellInfo *cell) 
     for (const auto &port_pair : cell->ports) {
         IdString port_name = port_pair.first;
         NetInfo *net = port_pair.second.net;
-        if (net == nullptr) {
+        if (net == nullptr || net->driver.cell == nullptr) {
             continue;
         }
 
-        // This net doesn't have a driver, probably not valid?
-        NPNR_ASSERT(net->driver.cell != nullptr);
+        if (ctx->io_port_types.count(net->driver.cell->type)) {
+            continue;
+        }
 
         // Only check sink BELs.
         if (net->driver.cell == cell && net->driver.port == port_name) {
@@ -392,15 +458,19 @@ void DedicatedInterconnect::explain_bel_status(BelId bel, const CellInfo *cell) 
         // This net doesn't have a driver, probably not valid?
         NPNR_ASSERT(net->driver.cell != nullptr);
 
+        if (ctx->io_port_types.count(net->driver.cell->type)) {
+            continue;
+        }
+
         // Only check sink BELs.
         if (net->driver.cell == cell && net->driver.port == port_name) {
             if (!is_driver_on_net_valid(bel, cell, port_name, net)) {
-                log_info("Driver %s/%s is not valid on net '%s'", cell->name.c_str(ctx), port_name.c_str(ctx),
+                log_info("Driver %s/%s is not valid on net '%s'\n", cell->name.c_str(ctx), port_name.c_str(ctx),
                          net->name.c_str(ctx));
             }
         } else {
             if (!is_sink_on_net_valid(bel, cell, port_name, net)) {
-                log_info("Sink %s/%s is not valid on net '%s'", cell->name.c_str(ctx), port_name.c_str(ctx),
+                log_info("Sink %s/%s is not valid on net '%s'\n", cell->name.c_str(ctx), port_name.c_str(ctx),
                          net->name.c_str(ctx));
             }
         }
@@ -496,7 +566,7 @@ void DedicatedInterconnect::find_dedicated_interconnect()
         }
     }
 
-    std::unordered_set<TileTypeBelPin> seen_pins;
+    pool<TileTypeBelPin> seen_pins;
     for (auto sink_pair : sinks) {
         for (auto src : sink_pair.second) {
             seen_pins.emplace(src.type_bel_pin);
@@ -513,7 +583,7 @@ void DedicatedInterconnect::find_dedicated_interconnect()
         }
 
         for (int i = 0; i < bel_data.num_bel_wires; ++i) {
-            if (bel_data.types[i] != PORT_OUT) {
+            if (bel_data.types[i] != PORT_OUT || bel_data.wires[i] == -1) {
                 continue;
             }
 
@@ -558,7 +628,7 @@ void DedicatedInterconnect::expand_sink_bel(BelId sink_bel, IdString sink_pin, W
     nodes_to_expand.push_back(wire_node);
 
     Loc sink_loc = ctx->getBelLocation(sink_bel);
-    std::unordered_set<DeltaTileTypeBelPin> srcs;
+    pool<DeltaTileTypeBelPin> srcs;
 
     while (!nodes_to_expand.empty()) {
         WireNode node_to_expand = nodes_to_expand.back();
@@ -580,9 +650,9 @@ void DedicatedInterconnect::expand_sink_bel(BelId sink_bel, IdString sink_pin, W
 
             WireNode next_node;
             next_node.wire = wire;
-            next_node.depth = node_to_expand.depth += 1;
+            next_node.depth = node_to_expand.depth;
 
-            if (next_node.depth > kMaxDepth) {
+            if (node_to_expand.depth > kMaxDepth) {
                 // Dedicated routing should reach sources by kMaxDepth (with
                 // tuning).
                 //
@@ -625,6 +695,8 @@ void DedicatedInterconnect::expand_sink_bel(BelId sink_bel, IdString sink_pin, W
                 }
             } else {
                 next_node.state = node_to_expand.state;
+                if (next_node.state == IN_ROUTING)
+                    next_node.depth++;
             }
 
             if (expand_node) {
@@ -701,7 +773,7 @@ void DedicatedInterconnect::expand_source_bel(BelId src_bel, IdString src_pin, W
     nodes_to_expand.push_back(wire_node);
 
     Loc src_loc = ctx->getBelLocation(src_bel);
-    std::unordered_set<DeltaTileTypeBelPin> dsts;
+    pool<DeltaTileTypeBelPin> dsts;
 
     while (!nodes_to_expand.empty()) {
         WireNode node_to_expand = nodes_to_expand.back();
@@ -723,9 +795,9 @@ void DedicatedInterconnect::expand_source_bel(BelId src_bel, IdString src_pin, W
 
             WireNode next_node;
             next_node.wire = wire;
-            next_node.depth = node_to_expand.depth += 1;
+            next_node.depth = node_to_expand.depth;
 
-            if (next_node.depth > kMaxDepth) {
+            if (node_to_expand.depth > kMaxDepth) {
                 // Dedicated routing should reach sources by kMaxDepth (with
                 // tuning).
                 //
@@ -768,6 +840,8 @@ void DedicatedInterconnect::expand_source_bel(BelId src_bel, IdString src_pin, W
                 }
             } else {
                 next_node.state = node_to_expand.state;
+                if (next_node.state == IN_ROUTING)
+                    next_node.depth++;
             }
 
             if (expand_node) {

@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -140,7 +140,7 @@ class IdList : public Item
   private:
     // Children that we manage the memory for, stored for quick lookup from
     // IdString to child.
-    std::unordered_map<IdStringList, std::unique_ptr<IdStringItem>> managed_;
+    dict<IdStringList, std::unique_ptr<IdStringItem>> managed_;
     // Type of children that the list creates.
     ElementType child_type_;
 
@@ -184,7 +184,7 @@ template <typename ElementT> class ElementList : public Item
     ElementGetter getter_;
     // Children that we manage the memory for, stored for quick lookup from
     // IdString to child.
-    std::unordered_map<IdStringList, std::unique_ptr<Item>> managed_;
+    dict<IdStringList, std::unique_ptr<Item>> managed_;
     // Type of children that he list creates.
     ElementType child_type_;
 

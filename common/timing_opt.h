@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -29,7 +29,7 @@ struct TimingOptCfg
     // The timing optimiser will *only* optimise cells of these types
     // Normally these would only be logic cells (or tiles if applicable), the algorithm makes little sense
     // for other cell types
-    std::unordered_set<IdString> cellTypes;
+    pool<IdString> cellTypes;
 };
 
 extern bool timing_opt(Context *ctx, TimingOptCfg cfg);

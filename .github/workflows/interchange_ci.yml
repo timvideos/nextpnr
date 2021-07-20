@@ -22,14 +22,17 @@ jobs:
       uses: hendrikmuhs/ccache-action@v1
 
     - name: Get yosys
-      run: git clone https://github.com/YosysHQ/yosys.git
+      run: |
+        git clone https://github.com/YosysHQ/yosys.git
+        cd yosys
+        echo "YOSYS_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
 
     - name: Cache yosys installation
       uses: actions/cache@v2
       id: cache-yosys
       with:
         path: .yosys
-        key: cache-yosys-${{ hashFiles('**/yosys/.git/HEAD') }}
+        key: cache-yosys-${{ env.YOSYS_SHA }}
 
     - name: Build yosys
       run: |
@@ -70,7 +73,7 @@ jobs:
       # debugging CI failures.
       fail-fast: false
       matrix:
-        device: [xc7a35t, xc7a100t, xc7a200t, xc7z010, LIFCL-17]
+        device: [xc7a35t, xc7a100t, xc7a200t, xc7z010, LIFCL-17, LIFCL-40]
     steps:
 
     - uses: actions/checkout@v2
@@ -88,14 +91,17 @@ jobs:
       uses: hendrikmuhs/ccache-action@v1
 
     - name: Get yosys
-      run: git clone https://github.com/YosysHQ/yosys.git
+      run: |
+        git clone https://github.com/YosysHQ/yosys.git
+        cd yosys
+        echo "YOSYS_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
 
     - name: Cache yosys installation
       uses: actions/cache@v2
       id: cache-yosys
       with:
         path: .yosys
-        key: cache-yosys-${{ hashFiles('**/yosys/.git/HEAD') }}
+        key: cache-yosys-${{ env.YOSYS_SHA }}
 
     - name: Build yosys
       run: |
@@ -108,8 +114,8 @@ jobs:
       env:
         RAPIDWRIGHT_PATH: ${{ github.workspace }}/RapidWright
         PYTHON_INTERCHANGE_PATH: ${{ github.workspace }}/python-fpga-interchange
-        PYTHON_INTERCHANGE_TAG: v0.0.10
-        PRJOXIDE_REVISION: a85135648c3ef2f7b3fd53ae2187ef6460e34b16
+        PYTHON_INTERCHANGE_TAG: v0.0.17
+        PRJOXIDE_REVISION: 1bf30dee9c023c4c66cfc44fd0bc28addd229c89
         DEVICE: ${{ matrix.device }}
       run: |
         export PATH="/usr/lib/ccache:/usr/local/opt/ccache/libexec:$PATH"

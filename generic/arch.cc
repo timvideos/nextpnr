@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -553,8 +553,8 @@ bool Arch::place()
     std::string placer = str_or_default(settings, id("placer"), defaultPlacer);
     if (placer == "heap") {
         bool have_iobuf_or_constr = false;
-        for (auto cell : sorted(cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : cells) {
+            CellInfo *ci = cell.second.get();
             if (ci->type == id("GENERIC_IOB") || ci->bel != BelId() || ci->attrs.count(id("BEL"))) {
                 have_iobuf_or_constr = true;
                 break;

@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Claire Wolf <claire@symbioticeda.com>
- *  Copyright (C) 2018-19  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018-19  gatecat <gatecat@ds0.me>
  *  Copyright (C) 2021  Symbiflow Authors
  *
  *
@@ -94,6 +94,15 @@ struct TileStatus
     PseudoPipModel pseudo_pip_model;
 };
 
+struct Cluster
+{
+    uint32_t index;
+    CellInfo *root;
+    std::vector<CellInfo *> cluster_nodes;
+    dict<IdString, IdString> cell_cluster_node_map;
+    dict<IdString, std::vector<std::pair<IdString, CellInfo *>>> cluster_node_cells;
+};
+
 struct Arch : ArchAPI<ArchRanges>
 {
     boost::iostreams::mapped_file_source blob_file;
@@ -103,14 +112,14 @@ struct Arch : ArchAPI<ArchRanges>
     // Guard initialization of "by_name" maps if accessed from multiple
     // threads on a "const Context *".
     mutable std::mutex by_name_mutex;
-    mutable std::unordered_map<IdString, int> tile_by_name;
-    mutable std::unordered_map<IdString, std::pair<int, int>> site_by_name;
+    mutable dict<IdString, int> tile_by_name;
+    mutable dict<IdString, std::pair<int, int>> site_by_name;
 
-    std::unordered_map<WireId, NetInfo *> wire_to_net;
-    std::unordered_map<PipId, NetInfo *> pip_to_net;
+    dict<WireId, NetInfo *> wire_to_net;
+    dict<PipId, NetInfo *> pip_to_net;
 
     DedicatedInterconnect dedicated_interconnect;
-    HashTables::HashMap<int32_t, TileStatus> tileStatus;
+    dict<int32_t, TileStatus> tileStatus;
     PseudoPipData pseudo_pip_data;
 
     ArchArgs args;
@@ -258,6 +267,20 @@ struct Arch : ArchAPI<ArchRanges>
                 map_cell_pins(cell, mapping, /*bind_constants=*/false);
             }
             constraints.bindBel(tile_status.tags.data(), get_cell_constraints(bel, cell->type));
+
+            // Clean previous cell placement in tile
+            if (cell->bel != BelId()) {
+                TileStatus &prev_tile_status = get_tile_status(cell->bel.tile);
+                NPNR_ASSERT(prev_tile_status.boundcells[cell->bel.index] != nullptr);
+
+                const auto &prev_bel_data = bel_info(chip_info, cell->bel);
+                NPNR_ASSERT(prev_bel_data.category == BEL_CATEGORY_LOGIC);
+
+                get_site_status(prev_tile_status, prev_bel_data).unbindBel(cell);
+                prev_tile_status.boundcells[cell->bel.index] = nullptr;
+
+                constraints.unbindBel(prev_tile_status.tags.data(), get_cell_constraints(cell->bel, cell->type));
+            }
         } else {
             map_port_pins(bel, cell);
             // FIXME: Probably need to actually constraint io port cell/bel,
@@ -533,6 +556,9 @@ struct Arch : ArchAPI<ArchRanges>
         return range;
     }
 
+    bool is_site_wire(WireId wire) const;
+    WireCategory get_wire_category(WireId wire) const;
+
     // -------------------------------------------------
 
     PipId getPipByName(IdStringList name) const final;
@@ -550,7 +576,8 @@ struct Arch : ArchAPI<ArchRanges>
         const PipInfoPOD &pip_data = pip_info(chip_info, pip);
         for (int32_t wire_index : pip_data.pseudo_cell_wires) {
             wire.index = wire_index;
-            assign_net_to_wire(wire, net, "pseudo", /*require_empty=*/true);
+            if (getBoundWireNet(wire) != net)
+                assign_net_to_wire(wire, net, "pseudo", /*require_empty=*/true);
         }
 
         if (pip_data.pseudo_cell_wires.size() > 0) {
@@ -682,10 +709,26 @@ struct Arch : ArchAPI<ArchRanges>
 
     // -------------------------------------------------
 
-    void place_iobufs(WireId pad_wire, NetInfo *net, const std::unordered_set<CellInfo *> &tightly_attached_bels,
-                      std::unordered_set<CellInfo *> *placed_cells);
+    void place_iobufs(WireId pad_wire, NetInfo *net,
+                      const dict<CellInfo *, IdString, hash_ptr_ops> &tightly_attached_bels,
+                      pool<CellInfo *, hash_ptr_ops> *placed_cells);
+
     void pack_ports();
+
+    // Clusters
+    void pack_cluster();
+    void prepare_cluster(const ClusterPOD *cluster, uint32_t index);
+    dict<ClusterId, Cluster> clusters;
+
+    // User constraints
+    void place_constraints();
+
     void decode_lut_cells();
+
+    const GlobalCellPOD *global_cell_info(IdString cell_type) const;
+    void place_globals();
+    void route_globals();
+
     bool pack() final;
     bool place() final;
     bool route() final;
@@ -813,10 +856,10 @@ struct Arch : ArchAPI<ArchRanges>
         }
         const TileStatus &tile_status = iter->second;
         const CellInfo *cell = tile_status.boundcells[bel.index];
+
         if (cell != nullptr) {
-            if (!dedicated_interconnect.isBelLocationValid(bel, cell)) {
+            if (!dedicated_interconnect.isBelLocationValid(bel, cell))
                 return false;
-            }
 
             if (io_port_types.count(cell->type)) {
                 // FIXME: Probably need to actually constraint io port cell/bel,
@@ -829,15 +872,25 @@ struct Arch : ArchAPI<ArchRanges>
                 return false;
             }
         }
+
         // Still check site status if cell is nullptr; as other bels in the site could be illegal (for example when
         // dedicated paths can no longer be used after ripping up a cell)
         auto &bel_data = bel_info(chip_info, bel);
-        return get_site_status(tile_status, bel_data).checkSiteRouting(getCtx(), tile_status);
+        bool site_status = get_site_status(tile_status, bel_data).checkSiteRouting(getCtx(), tile_status);
+
+        return site_status;
     }
+
+    CellInfo *getClusterRootCell(ClusterId cluster) const override;
+    ArcBounds getClusterBounds(ClusterId cluster) const override;
+    Loc getClusterOffset(const CellInfo *cell) const override;
+    bool isClusterStrict(const CellInfo *cell) const override;
+    bool getClusterPlacement(ClusterId cluster, BelId root_bel,
+                             std::vector<std::pair<CellInfo *, BelId>> &placement) const override;
 
     IdString get_bel_tiletype(BelId bel) const { return IdString(loc_info(chip_info, bel).name); }
 
-    std::unordered_map<WireId, Loc> sink_locs, source_locs;
+    dict<WireId, Loc> sink_locs, source_locs;
     // -------------------------------------------------
     void assignArchInfo() final {}
 
@@ -854,8 +907,8 @@ struct Arch : ArchAPI<ArchRanges>
     void write_physical_netlist(const std::string &filename) const;
     void parse_xdc(const std::string &filename);
 
-    std::unordered_set<IdString> io_port_types;
-    std::unordered_set<BelId> pads;
+    pool<IdString> io_port_types;
+    pool<BelId> pads;
 
     bool is_site_port(PipId pip) const
     {
@@ -1062,7 +1115,7 @@ struct Arch : ArchAPI<ArchRanges>
     IdString gnd_cell_pin;
     IdString vcc_cell_pin;
     std::vector<std::vector<LutElement>> lut_elements;
-    std::unordered_map<IdString, const LutCellPOD *> lut_cells;
+    dict<IdString, const LutCellPOD *> lut_cells;
 
     // Of the LUT cells, which is used for wires?
     // Note: May be null in arch's without wire LUT types.  Assumption is
@@ -1103,6 +1156,9 @@ struct Arch : ArchAPI<ArchRanges>
 
     const DefaultCellConnsPOD *get_default_conns(IdString cell_type) const;
     void pack_default_conns();
+
+    dict<IdString, std::vector<CellInfo *>> macro_to_cells;
+    void expand_macros();
 };
 
 NEXTPNR_NAMESPACE_END

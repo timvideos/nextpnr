@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -916,7 +916,9 @@ struct Arch : BaseArch<ArchRanges>
     // fast access to  X and Y IdStrings for building object names
     std::vector<IdString> x_ids, y_ids;
     // inverse of the above for name->object mapping
-    std::unordered_map<IdString, int> id_to_x, id_to_y;
+    dict<IdString, int> id_to_x, id_to_y;
+
+    pool<PipId> disabled_pips;
 
     // -------------------------------------------------
 
@@ -974,6 +976,20 @@ struct Arch : BaseArch<ArchRanges>
     {
         NPNR_ASSERT(bel != BelId());
         return tileStatus[bel.tile].boundcells[bel.index] == nullptr;
+    }
+
+    bool checkPipAvail(PipId pip) const override
+    {
+        if (disabled_pips.count(pip))
+            return false;
+        return BaseArch::checkPipAvail(pip);
+    }
+
+    bool checkPipAvailForNet(PipId pip, NetInfo *net) const override
+    {
+        if (disabled_pips.count(pip))
+            return false;
+        return BaseArch::checkPipAvailForNet(pip, net);
     }
 
     CellInfo *getBoundBelCell(BelId bel) const override
@@ -1034,6 +1050,7 @@ struct Arch : BaseArch<ArchRanges>
     // -------------------------------------------------
 
     WireId getWireByName(IdStringList name) const override;
+
     IdStringList getWireName(WireId wire) const override
     {
         NPNR_ASSERT(wire != WireId());
@@ -1043,6 +1060,7 @@ struct Arch : BaseArch<ArchRanges>
     }
 
     std::vector<std::pair<IdString, std::string>> getWireAttrs(WireId wire) const override;
+    IdString getWireType(WireId wire) const override;
 
     DelayQuad getWireDelay(WireId wire) const override { return DelayQuad(0); }
 
@@ -1179,7 +1197,7 @@ struct Arch : BaseArch<ArchRanges>
 
     // for better DSP bounding boxes
     void pre_routing();
-    std::unordered_set<WireId> dsp_wires, lram_wires;
+    pool<WireId> dsp_wires, lram_wires;
 
     // -------------------------------------------------
 
@@ -1269,9 +1287,9 @@ struct Arch : BaseArch<ArchRanges>
 
     // -------------------------------------------------
 
-    typedef std::unordered_map<IdString, CellPinStyle> CellPinsData;
+    typedef dict<IdString, CellPinStyle> CellPinsData;
 
-    std::unordered_map<IdString, CellPinsData> cell_pins_db;
+    dict<IdString, CellPinsData> cell_pins_db;
     CellPinStyle get_cell_pin_style(const CellInfo *cell, IdString port) const;
 
     void init_cell_pin_data();
@@ -1359,7 +1377,7 @@ struct Arch : BaseArch<ArchRanges>
 
     // -------------------------------------------------
     // Data about different IO standard, mostly used by bitgen
-    static const std::unordered_map<std::string, IOTypeData> io_types;
+    static const dict<std::string, IOTypeData> io_types;
     int get_io_type_vcc(const std::string &io_type) const;
     bool is_io_type_diff(const std::string &io_type) const;
     bool is_io_type_ref(const std::string &io_type) const;
@@ -1386,7 +1404,7 @@ struct Arch : BaseArch<ArchRanges>
     // -------------------------------------------------
 
     // List of IO constraints, used by PDC parser
-    std::unordered_map<IdString, std::unordered_map<IdString, Property>> io_attr;
+    dict<IdString, dict<IdString, Property>> io_attr;
 
     void read_pdc(std::istream &in);
 

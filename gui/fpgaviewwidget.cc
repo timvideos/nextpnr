@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -22,6 +22,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDesktopWidget>
 #include <QDir>
 #include <QFileInfo>
 #include <QImageWriter>
@@ -287,7 +288,11 @@ QMatrix4x4 FPGAViewWidget::getProjection(void)
 void FPGAViewWidget::paintGL()
 {
     auto gl = QOpenGLContext::currentContext()->functions();
+#if defined(__APPLE__)
     const qreal retinaScale = devicePixelRatio();
+#else
+    const qreal retinaScale = devicePixelRatioF();
+#endif
     gl->glViewport(0, 0, width() * retinaScale, height() * retinaScale);
     gl->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -807,12 +812,10 @@ void FPGAViewWidget::mouseMoveEvent(QMouseEvent *event)
 // coordinates.
 QVector4D FPGAViewWidget::mouseToWorldCoordinates(int x, int y)
 {
-    const qreal retinaScale = devicePixelRatio();
-
     auto projection = getProjection();
 
     QMatrix4x4 vp;
-    vp.viewport(0, 0, width() * retinaScale, height() * retinaScale);
+    vp.viewport(0, 0, width(), height());
 
     QVector4D vec(x, y, 1, 1);
     vec = vp.inverted() * vec;

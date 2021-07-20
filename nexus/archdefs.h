@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -20,9 +20,8 @@
 #ifndef NEXUS_ARCHDEFS_H
 #define NEXUS_ARCHDEFS_H
 
-#include <boost/functional/hash.hpp>
-#include <unordered_map>
-
+#include "base_clusterinfo.h"
+#include "hashlib.h"
 #include "idstring.h"
 #include "nextpnr_namespaces.h"
 
@@ -61,6 +60,7 @@ struct BelId
     {
         return tile < other.tile || (tile == other.tile && index < other.index);
     }
+    unsigned int hash() const { return mkhash(tile, index); }
 };
 
 struct WireId
@@ -79,6 +79,7 @@ struct WireId
     {
         return tile < other.tile || (tile == other.tile && index < other.index);
     }
+    unsigned int hash() const { return mkhash(tile, index); }
 };
 
 struct PipId
@@ -96,6 +97,7 @@ struct PipId
     {
         return tile < other.tile || (tile == other.tile && index < other.index);
     }
+    unsigned int hash() const { return mkhash(tile, index); }
 };
 
 typedef IdString BelBucketId;
@@ -110,6 +112,7 @@ struct GroupId
 
     bool operator==(const GroupId &other) const { return (type == other.type) && (x == other.x) && (y == other.y); }
     bool operator!=(const GroupId &other) const { return (type != other.type) || (x != other.x) || (y == other.y); }
+    unsigned int hash() const { return mkhash(mkhash(x, y), int(type)); }
 };
 
 struct DecalId
@@ -133,6 +136,7 @@ struct DecalId
     {
         return (type != other.type) || (index != other.index) || (active != other.active);
     }
+    unsigned int hash() const { return mkhash(index, int(type)); }
 };
 
 struct ArchNetInfo
@@ -157,7 +161,9 @@ inline bool operator!=(const FFControlSet &a, const FFControlSet &b)
            (a.ce != b.ce);
 }
 
-struct ArchCellInfo
+typedef IdString ClusterId;
+
+struct ArchCellInfo : BaseClusterInfo
 {
     union
     {
@@ -175,68 +181,9 @@ struct ArchCellInfo
 
     int tmg_index = -1;
     // Map from cell/bel ports to logical timing ports
-    std::unordered_map<IdString, IdString> tmg_portmap;
+    dict<IdString, IdString> tmg_portmap;
 };
 
 NEXTPNR_NAMESPACE_END
-
-namespace std {
-template <> struct hash<NEXTPNR_NAMESPACE_PREFIX BelId>
-{
-    std::size_t operator()(const NEXTPNR_NAMESPACE_PREFIX BelId &bel) const noexcept
-    {
-        std::size_t seed = 0;
-        boost::hash_combine(seed, hash<int>()(bel.tile));
-        boost::hash_combine(seed, hash<int>()(bel.index));
-        return seed;
-    }
-};
-
-template <> struct hash<NEXTPNR_NAMESPACE_PREFIX WireId>
-{
-    std::size_t operator()(const NEXTPNR_NAMESPACE_PREFIX WireId &wire) const noexcept
-    {
-        std::size_t seed = 0;
-        boost::hash_combine(seed, hash<int>()(wire.tile));
-        boost::hash_combine(seed, hash<int>()(wire.index));
-        return seed;
-    }
-};
-
-template <> struct hash<NEXTPNR_NAMESPACE_PREFIX PipId>
-{
-    std::size_t operator()(const NEXTPNR_NAMESPACE_PREFIX PipId &pip) const noexcept
-    {
-        std::size_t seed = 0;
-        boost::hash_combine(seed, hash<int>()(pip.tile));
-        boost::hash_combine(seed, hash<int>()(pip.index));
-        return seed;
-    }
-};
-
-template <> struct hash<NEXTPNR_NAMESPACE_PREFIX GroupId>
-{
-    std::size_t operator()(const NEXTPNR_NAMESPACE_PREFIX GroupId &group) const noexcept
-    {
-        std::size_t seed = 0;
-        boost::hash_combine(seed, hash<int>()(group.type));
-        boost::hash_combine(seed, hash<int>()(group.x));
-        boost::hash_combine(seed, hash<int>()(group.y));
-        return seed;
-    }
-};
-
-template <> struct hash<NEXTPNR_NAMESPACE_PREFIX DecalId>
-{
-    std::size_t operator()(const NEXTPNR_NAMESPACE_PREFIX DecalId &decal) const noexcept
-    {
-        std::size_t seed = 0;
-        boost::hash_combine(seed, hash<int>()(decal.type));
-        boost::hash_combine(seed, hash<int>()(decal.index));
-        return seed;
-    }
-};
-
-} // namespace std
 
 #endif /* NEXUS_ARCHDEFS_H */

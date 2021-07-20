@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -33,7 +33,7 @@ class NexusCommandHandler : public CommandHandler
   public:
     NexusCommandHandler(int argc, char **argv);
     virtual ~NexusCommandHandler(){};
-    std::unique_ptr<Context> createContext(std::unordered_map<std::string, Property> &values) override;
+    std::unique_ptr<Context> createContext(dict<std::string, Property> &values) override;
     void setupArchContext(Context *ctx) override{};
     void customBitstream(Context *ctx) override;
     void customAfterLoad(Context *ctx) override;
@@ -66,7 +66,7 @@ void NexusCommandHandler::customBitstream(Context *ctx)
     }
 }
 
-std::unique_ptr<Context> NexusCommandHandler::createContext(std::unordered_map<std::string, Property> &values)
+std::unique_ptr<Context> NexusCommandHandler::createContext(dict<std::string, Property> &values)
 {
     ArchArgs chipArgs;
     if (!vm.count("device")) {

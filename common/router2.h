@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2019  David Shah <dave@ds0.me>
+ *  Copyright (C) 2019  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -49,6 +49,8 @@ struct Router2Cfg
 
     // Print additional performance profiling information
     bool perf_profile = false;
+
+    std::string heatmap;
 };
 
 void router2(Context *ctx, const Router2Cfg &cfg);

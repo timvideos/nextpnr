@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -38,7 +38,7 @@ log_write_type log_write_function = nullptr;
 std::string log_last_error;
 void (*log_error_atexit)() = NULL;
 
-std::unordered_map<LogLevel, int> message_count_by_level;
+dict<LogLevel, int, loglevel_hash_ops> message_count_by_level;
 static int log_newline_count = 0;
 bool had_nonfatal_error = false;
 

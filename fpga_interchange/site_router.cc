@@ -21,12 +21,13 @@
 
 #include "design_utils.h"
 #include "dynamic_bitarray.h"
-#include "hash_table.h"
 #include "log.h"
 #include "site_routing_cache.h"
 
 #include "site_arch.h"
 #include "site_arch.impl.h"
+
+#include <queue>
 
 NEXTPNR_NAMESPACE_BEGIN
 
@@ -53,16 +54,17 @@ bool check_initial_wires(const Context *ctx, SiteInformation *site_info)
 {
     // Propagate from BEL pins to first wire, checking for trivial routing
     // conflicts.
-    HashTables::HashMap<WireId, NetInfo *> wires;
+    dict<WireId, NetInfo *> wires;
 
     for (CellInfo *cell : site_info->cells_in_site) {
         BelId bel = cell->bel;
         for (const auto &pin_pair : cell->cell_bel_pins) {
             if (!cell->ports.count(pin_pair.first))
-                log_error("Cell %s:%s is missing expected port %s\n", ctx->nameOf(cell), cell->type.c_str(ctx),
-                          pin_pair.first.c_str(ctx));
+                continue;
             const PortInfo &port = cell->ports.at(pin_pair.first);
-            NPNR_ASSERT(port.net != nullptr);
+
+            if (port.net == nullptr)
+                continue;
 
             for (IdString bel_pin_name : pin_pair.second) {
                 BelPin bel_pin;
@@ -97,6 +99,11 @@ bool check_initial_wires(const Context *ctx, SiteInformation *site_info)
 
 static bool is_invalid_site_port(const SiteArch *ctx, const SiteNetInfo *net, const SitePip &pip)
 {
+    // Blocked ports
+    auto fnd_rsv = ctx->blocked_site_ports.find(pip.pip);
+    if (fnd_rsv != ctx->blocked_site_ports.end() && !fnd_rsv->second.count(net->net))
+        return true;
+    // Synthetic pips
     SyntheticType type = ctx->pip_synthetic_type(pip);
     PhysicalNetlist::PhysNetlist::NetType net_type = ctx->ctx->get_net_type(net->net);
     bool is_invalid = false;
@@ -133,7 +140,7 @@ struct SiteExpansionLoop
 
     bool expand_result;
     SiteWire net_driver;
-    HashTables::HashSet<SiteWire> net_users;
+    pool<SiteWire> net_users;
 
     SiteRoutingSolution solution;
 
@@ -157,6 +164,7 @@ struct SiteExpansionLoop
                 NPNR_ASSERT((*parent)->wire.type == SiteWire::SITE_WIRE);
                 NPNR_ASSERT(node->can_leave_site());
                 node->mark_left_site();
+                node->mark_left_site_after_entering();
             } else if (wire.type == SiteWire::SITE_PORT_SOURCE) {
                 // This is a backward walk, so this is considered entering
                 // the site.
@@ -171,6 +179,7 @@ struct SiteExpansionLoop
                     // the site.
                     NPNR_ASSERT(node->can_leave_site());
                     node->mark_left_site();
+                    node->mark_left_site_after_entering();
                 } else {
                     NPNR_ASSERT((*parent)->wire.type == SiteWire::SITE_PORT_SOURCE);
                     NPNR_ASSERT(node->can_enter_site());
@@ -205,7 +214,7 @@ struct SiteExpansionLoop
 
         auto node = new_node(net->driver, SitePip(), /*parent=*/nullptr);
 
-        HashTables::HashSet<SiteWire> targets;
+        pool<SiteWire> targets;
         targets.insert(net->users.begin(), net->users.end());
 
         if (verbose_site_router(ctx)) {
@@ -243,7 +252,7 @@ struct SiteExpansionLoop
                         if (!parent_node->can_leave_site()) {
                             // This path has already left the site once, don't leave it again!
                             if (verbose_site_router(ctx)) {
-                                log_info("Pip %s is not a valid for this path because it has already left the site\n",
+                                log_info("%s is not a valid PIP for this path because it has already left the site\n",
                                          ctx->nameOfPip(pip));
                             }
                             continue;
@@ -256,7 +265,7 @@ struct SiteExpansionLoop
                             // don't enter it again!
                             if (verbose_site_router(ctx)) {
                                 log_info(
-                                        "Pip %s is not a valid for this path because it has already entered the site\n",
+                                        "%s is not a valid PIP for this path because it has already entered the site\n",
                                         ctx->nameOfPip(pip));
                             }
                             continue;
@@ -274,6 +283,16 @@ struct SiteExpansionLoop
                 }
 
                 auto node = new_node(wire, pip, &parent_node);
+
+                if (!node->is_valid_node()) {
+                    if (verbose_site_router(ctx)) {
+                        log_info(
+                                "%s is not a valid PIP for this path because it has left the site after entering it.\n",
+                                ctx->nameOfPip(pip));
+                    }
+                    continue;
+                }
+
                 if (targets.count(wire)) {
                     completed_routes.push_back(node.get_index());
                     max_depth = std::max(max_depth, node->depth);
@@ -287,7 +306,11 @@ struct SiteExpansionLoop
         // already unroutable!
         solution.clear();
         solution.store_solution(ctx, node_storage, net->driver, completed_routes);
-        solution.verify(ctx, *net);
+        bool verify = solution.verify(ctx, *net);
+
+        if (!verify)
+            return false;
+
         for (size_t route : completed_routes) {
             SiteWire wire = node_storage->get_node(route)->wire;
             targets.erase(wire);
@@ -690,6 +713,8 @@ static bool route_site(SiteArch *ctx, SiteRoutingCache *site_routing_cache, Rout
     expansions.reserve(ctx->nets.size());
 
     for (auto &net_pair : ctx->nets) {
+        if (net_pair.first->driver.cell == nullptr)
+            continue;
         SiteNetInfo *net = &net_pair.second;
 
         if (net->net->loop == nullptr) {
@@ -711,7 +736,7 @@ static bool route_site(SiteArch *ctx, SiteRoutingCache *site_routing_cache, Rout
 
     // Create a flat sink list and map.
     std::vector<SiteWire> sinks;
-    HashTables::HashMap<SiteWire, size_t> sink_map;
+    dict<SiteWire, size_t> sink_map;
     size_t number_solutions = 0;
     for (const auto *expansion : expansions) {
         number_solutions += expansion->num_solutions();
@@ -776,6 +801,8 @@ void check_routing(const SiteArch &site_arch)
 {
     for (auto &net_pair : site_arch.nets) {
         const NetInfo *net = net_pair.first;
+        if (net->driver.cell == nullptr)
+            continue;
         const SiteNetInfo &net_info = net_pair.second;
 
         for (const auto &user : net_info.users) {
@@ -831,12 +858,12 @@ static void apply_constant_routing(Context *ctx, const SiteArch &site_arch, NetI
     NPNR_ASSERT(net == vcc_net || net == gnd_net);
 
     for (auto &user : site_net->users) {
-        // FIXME: Handle case where pip is "can_invert", and that
-        // inversion helps with accomidating "best constant".
-        bool is_path_inverting = false;
+        bool is_path_inverting = false, path_can_invert = false;
 
         SiteWire wire = user;
         PipId inverting_pip;
+        PhysicalNetlist::PhysNetlist::NetType pref_const = PhysicalNetlist::PhysNetlist::NetType::SIGNAL;
+
         while (wire != site_net->driver) {
             SitePip pip = site_net->wires.at(wire).pip;
             NPNR_ASSERT(site_arch.getPipDstWire(pip) == wire);
@@ -852,10 +879,23 @@ static void apply_constant_routing(Context *ctx, const SiteArch &site_arch, NetI
                 inverting_pip = pip.pip;
             }
 
+            if (site_arch.canInvert(pip)) {
+                path_can_invert = true;
+                NPNR_ASSERT(pip.type == SitePip::SITE_PIP);
+                inverting_pip = pip.pip;
+            }
+
             wire = site_arch.getPipSrcWire(pip);
+            pref_const = site_arch.prefered_constant_net_type(pip);
         }
 
-        if (!is_path_inverting) {
+        bool is_pref_const = true;
+        if (pref_const == PhysicalNetlist::PhysNetlist::NetType::VCC && net == gnd_net)
+            is_pref_const = false;
+        else if (pref_const == PhysicalNetlist::PhysNetlist::NetType::GND && net == vcc_net)
+            is_pref_const = false;
+
+        if (!is_path_inverting && (!path_can_invert || is_pref_const)) {
             // This routing is boring, use base logic.
             apply_simple_routing(ctx, site_arch, net, site_net, user);
             continue;
@@ -929,7 +969,7 @@ static void apply_constant_routing(Context *ctx, const SiteArch &site_arch, NetI
             SitePip site_pip = site_net->wires.at(wire).pip;
             NPNR_ASSERT(site_arch.getPipDstWire(site_pip) == wire);
 
-            if (site_arch.isInverting(site_pip)) {
+            if (site_arch.isInverting(site_pip) || site_arch.canInvert(site_pip)) {
                 NPNR_ASSERT(after_inverter);
                 after_inverter = false;
 
@@ -952,7 +992,7 @@ static void apply_constant_routing(Context *ctx, const SiteArch &site_arch, NetI
     }
 }
 
-static void apply_routing(Context *ctx, const SiteArch &site_arch)
+static void apply_routing(Context *ctx, const SiteArch &site_arch, pool<std::pair<IdString, int32_t>> &lut_thrus)
 {
     IdString gnd_net_name(ctx->chip_info->constants->gnd_net_name);
     NetInfo *gnd_net = ctx->nets.at(gnd_net_name).get();
@@ -981,14 +1021,33 @@ static void apply_routing(Context *ctx, const SiteArch &site_arch)
                     continue;
                 }
 
+                auto &pip_data = pip_info(ctx->chip_info, site_pip.pip);
+
+                BelId bel;
+                bel.tile = site_pip.pip.tile;
+                bel.index = pip_data.bel;
+                const auto &bel_data = bel_info(ctx->chip_info, bel);
+
+                // Detect and store LUT thrus for allowance check during routing
+                if (bel_data.lut_element != -1) {
+                    WireId src_wire = ctx->getPipSrcWire(site_pip.pip);
+
+                    for (BelPin bel_pin : ctx->getWireBelPins(src_wire)) {
+                        if (bel_pin.bel != bel)
+                            continue;
+
+                        lut_thrus.insert(std::make_pair(bel_pin.pin, bel_pin.bel.index));
+                        break;
+                    }
+                }
+
                 ctx->bindPip(site_pip.pip, net, STRENGTH_PLACER);
             }
         }
     }
 }
 
-static bool map_luts_in_site(const SiteInformation &site_info,
-                             HashTables::HashSet<std::pair<IdString, IdString>, PairHash> *blocked_wires)
+static bool map_luts_in_site(const SiteInformation &site_info, pool<std::pair<IdString, IdString>> *blocked_wires)
 {
     const Context *ctx = site_info.ctx;
     const std::vector<LutElement> &lut_elements = ctx->lut_elements.at(site_info.tile_type);
@@ -1016,7 +1075,7 @@ static bool map_luts_in_site(const SiteInformation &site_info,
             continue;
         }
 
-        HashTables::HashSet<const LutBel *> blocked_luts;
+        pool<const LutBel *, hash_ptr_ops> blocked_luts;
         if (!lut_mapper.remap_luts(ctx, &blocked_luts)) {
             return false;
         }
@@ -1030,8 +1089,7 @@ static bool map_luts_in_site(const SiteInformation &site_info,
 }
 
 // Block outputs of unavailable LUTs to prevent site router from using them.
-static void block_lut_outputs(SiteArch *site_arch,
-                              const HashTables::HashSet<std::pair<IdString, IdString>, PairHash> &blocked_wires)
+static void block_lut_outputs(SiteArch *site_arch, const pool<std::pair<IdString, IdString>> &blocked_wires)
 {
     const Context *ctx = site_arch->site_info->ctx;
     auto &tile_info = ctx->chip_info->tile_types[site_arch->site_info->tile_type];
@@ -1055,6 +1113,135 @@ static void block_lut_outputs(SiteArch *site_arch,
 
         SiteWire lut_output_wire = site_arch->getBelPinWire(bel, bel_pin);
         site_arch->bindWire(lut_output_wire, &site_arch->blocking_site_net);
+    }
+}
+
+// Block wires corresponding to dedicated interconnections that are not
+// exposed to the general interconnect.
+// These wires cannot be chosen for the first element in a BEL chain, as they
+// would result in an unroutability error.
+static void block_cluster_wires(SiteArch *site_arch)
+{
+    const Context *ctx = site_arch->site_info->ctx;
+    auto &cells_in_site = site_arch->site_info->cells_in_site;
+
+    for (auto &cell : cells_in_site) {
+        if (cell->cluster == ClusterId())
+            continue;
+
+        if (ctx->getClusterRootCell(cell->cluster) != cell)
+            continue;
+
+        Cluster cluster = ctx->clusters.at(cell->cluster);
+
+        uint32_t cluster_id = cluster.index;
+        auto &cluster_data = cluster_info(ctx->chip_info, cluster_id);
+
+        if (cluster_data.chainable_ports.size() == 0)
+            continue;
+
+        IdString cluster_chain_input(cluster_data.chainable_ports[0].cell_sink);
+
+        if (cluster_chain_input == IdString())
+            continue;
+
+        auto &cell_bel_pins = cell->cell_bel_pins.at(cluster_chain_input);
+        for (auto &bel_pin : cell_bel_pins) {
+            SiteWire bel_pin_wire = site_arch->getBelPinWire(cell->bel, bel_pin);
+            site_arch->bindWire(bel_pin_wire, &site_arch->blocking_site_net);
+        }
+    }
+}
+
+// Reserve site ports that are on dedicated rather than general interconnect
+static void reserve_site_ports(SiteArch *site_arch)
+{
+    const Context *ctx = site_arch->site_info->ctx;
+    site_arch->blocked_site_ports.clear();
+    for (PipId in_pip : site_arch->input_site_ports) {
+        pool<NetInfo *, hash_ptr_ops> dedicated_nets;
+        const int max_iters = 100;
+
+        std::queue<WireId> visit_queue;
+        pool<WireId> already_visited;
+        WireId src = ctx->getPipSrcWire(in_pip);
+        visit_queue.push(src);
+        already_visited.insert(src);
+
+        int iter = 0;
+        while (!visit_queue.empty() && iter++ < max_iters) {
+            WireId next = visit_queue.front();
+            visit_queue.pop();
+            for (auto bp : ctx->getWireBelPins(next)) {
+                // Bel pins could mean dedicated routes
+                CellInfo *bound = ctx->getBoundBelCell(bp.bel);
+                if (bound == nullptr)
+                    continue;
+                // Need to find the corresponding cell pin
+                for (auto &port : bound->ports) {
+                    if (port.second.net == nullptr)
+                        continue;
+                    for (auto bel_pin : ctx->getBelPinsForCellPin(bound, port.first)) {
+                        if (bel_pin == bp.pin)
+                            dedicated_nets.insert(port.second.net);
+                    }
+                }
+            }
+            for (auto pip : ctx->getPipsUphill(next)) {
+                WireId next_src = ctx->getPipSrcWire(pip);
+                if (already_visited.count(next_src))
+                    continue;
+                visit_queue.push(next_src);
+                already_visited.insert(next_src);
+            }
+        }
+        if (iter < max_iters) {
+            if (ctx->debug)
+                log_info("Blocking PIP %s\n", ctx->nameOfPip(in_pip));
+            // If we didn't search up to the iteration limit, assume this node is not reachable from general routing
+            site_arch->blocked_site_ports[in_pip] = dedicated_nets;
+        }
+    }
+}
+
+// Recursively visit downhill PIPs until a SITE_PORT_SINK is reached.
+// Marks all PIPs for all valid paths.
+static bool visit_downhill_pips(const SiteArch *site_arch, const SiteWire &site_wire, std::vector<PipId> &valid_pips)
+{
+    bool valid_path_exists = false;
+    for (SitePip site_pip : site_arch->getPipsDownhill(site_wire)) {
+        const SiteWire &dst_wire = site_arch->getPipDstWire(site_pip);
+        if (dst_wire.type == SiteWire::SITE_PORT_SINK) {
+            valid_pips.push_back(site_pip.pip);
+            return true;
+        }
+
+        bool path_ok = visit_downhill_pips(site_arch, dst_wire, valid_pips);
+        valid_path_exists |= path_ok;
+
+        if (path_ok) {
+            valid_pips.push_back(site_pip.pip);
+        }
+    }
+
+    return valid_path_exists;
+}
+
+// Checks all downhill PIPs starting from driver wires.
+// All valid PIPs are stored and returned in a vector.
+static void check_downhill_pips(Context *ctx, const SiteArch *site_arch, std::vector<PipId> &valid_pips)
+{
+    auto &cells_in_site = site_arch->site_info->cells_in_site;
+
+    for (auto &net_pair : site_arch->nets) {
+        NetInfo *net = net_pair.first;
+        const SiteNetInfo *site_net = &net_pair.second;
+
+        if (net->driver.cell && cells_in_site.count(net->driver.cell)) {
+            const SiteWire &site_wire = site_net->driver;
+
+            visit_downhill_pips(site_arch, site_wire, valid_pips);
+        }
     }
 }
 
@@ -1112,7 +1299,7 @@ bool SiteRouter::checkSiteRouting(const Context *ctx, const TileStatus &tile_sta
     }
 
     SiteInformation site_info(ctx, tile, site, cells_in_site);
-    HashTables::HashSet<std::pair<IdString, IdString>, PairHash> blocked_wires;
+    pool<std::pair<IdString, IdString>> blocked_wires;
     if (!map_luts_in_site(site_info, &blocked_wires)) {
         site_ok = false;
         return site_ok;
@@ -1136,6 +1323,7 @@ bool SiteRouter::checkSiteRouting(const Context *ctx, const TileStatus &tile_sta
     // site_arch.archcheck();
 
     block_lut_outputs(&site_arch, blocked_wires);
+    block_cluster_wires(&site_arch);
 
     // Do a detailed routing check to see if the site has at least 1 valid
     // routing solution.
@@ -1190,15 +1378,19 @@ void SiteRouter::bindSiteRouting(Context *ctx)
     }
 
     SiteInformation site_info(ctx, tile, site, cells_in_site);
-    HashTables::HashSet<std::pair<IdString, IdString>, PairHash> blocked_wires;
+    pool<std::pair<IdString, IdString>> blocked_wires;
     NPNR_ASSERT(map_luts_in_site(site_info, &blocked_wires));
 
     SiteArch site_arch(&site_info);
     block_lut_outputs(&site_arch, blocked_wires);
+    block_cluster_wires(&site_arch);
+    reserve_site_ports(&site_arch);
     NPNR_ASSERT(route_site(&site_arch, &ctx->site_routing_cache, &ctx->node_storage, /*explain=*/false));
 
     check_routing(site_arch);
-    apply_routing(ctx, site_arch);
+    apply_routing(ctx, site_arch, lut_thrus);
+
+    check_downhill_pips(ctx, &site_arch, valid_pips);
     if (verbose_site_router(ctx)) {
         print_current_state(&site_arch);
     }

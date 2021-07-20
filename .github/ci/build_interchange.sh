@@ -35,7 +35,7 @@ function get_dependencies {
     python3 -m pip install -r requirements.txt
     popd
 
-    if [ ${DEVICE} == "LIFCL-17" ]; then
+    if [ ${DEVICE} == "LIFCL-17"  ] || [ ${DEVICE} == "LIFCL-40"  ]; then
         # Install prjoxide
         curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y
         git clone --recursive https://github.com/gatecat/prjoxide.git
@@ -57,7 +57,7 @@ function build_nextpnr {
     build_capnp
     mkdir build
     pushd build
-    cmake .. -DARCH=fpga_interchange -DRAPIDWRIGHT_PATH=${RAPIDWRIGHT_PATH} -DPYTHON_INTERCHANGE_PATH=${PYTHON_INTERCHANGE_PATH} -DUSE_ABSEIL=on
+    cmake .. -DARCH=fpga_interchange -DRAPIDWRIGHT_PATH=${RAPIDWRIGHT_PATH} -DPYTHON_INTERCHANGE_PATH=${PYTHON_INTERCHANGE_PATH}
     make nextpnr-fpga_interchange -j`nproc`
     popd
 }

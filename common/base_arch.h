@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "arch_api.h"
+#include "base_clusterinfo.h"
 #include "idstring.h"
 #include "nextpnr_types.h"
 
@@ -74,10 +75,40 @@ typename std::enable_if<std::is_same<Tret, Tc>::value, Tret>::type return_if_mat
 }
 
 template <typename Tret, typename Tc>
-typename std::enable_if<!std::is_same<Tret, Tc>::value, Tret>::type return_if_match(Tret r)
+typename std::enable_if<!std::is_same<Tret, Tc>::value, Tc>::type return_if_match(Tret r)
 {
     NPNR_ASSERT_FALSE("default implementations of cell type and bel bucket range functions only available when the "
                       "respective range types are 'const std::vector&'");
+}
+
+// Default implementations of the clustering functions
+template <typename Tid>
+typename std::enable_if<std::is_same<Tid, IdString>::value, CellInfo *>::type get_cluster_root(const BaseCtx *ctx,
+                                                                                               Tid cluster)
+{
+    return ctx->cells.at(cluster).get();
+}
+
+template <typename Tid>
+typename std::enable_if<!std::is_same<Tid, IdString>::value, CellInfo *>::type get_cluster_root(const BaseCtx *ctx,
+                                                                                                Tid cluster)
+{
+    NPNR_ASSERT_FALSE("default implementation of getClusterRootCell requires ClusterId to be IdString");
+}
+
+// Executes the lambda with the base cluster data, only if the derivation works
+template <typename Tret, typename Tcell, typename Tfunc>
+typename std::enable_if<std::is_base_of<BaseClusterInfo, Tcell>::value, Tret>::type
+if_using_basecluster(const Tcell *cell, Tfunc func)
+{
+    return func(static_cast<const BaseClusterInfo *>(cell));
+}
+template <typename Tret, typename Tcell, typename Tfunc>
+typename std::enable_if<!std::is_base_of<BaseClusterInfo, Tcell>::value, Tret>::type
+if_using_basecluster(const Tcell *cell, Tfunc func)
+{
+    NPNR_ASSERT_FALSE(
+            "default implementation of cluster functions requires ArchCellInfo to derive from BaseClusterInfo");
 }
 
 } // namespace
@@ -117,7 +148,7 @@ template <typename R> struct BaseArch : ArchAPI<R>
     virtual char getNameDelimiter() const override { return ' '; }
 
     // Bel methods
-    virtual uint32_t getBelChecksum(BelId bel) const override { return uint32_t(std::hash<BelId>()(bel)); }
+    virtual uint32_t getBelChecksum(BelId bel) const override { return bel.hash(); }
     virtual void bindBel(BelId bel, CellInfo *cell, PlaceStrength strength) override
     {
         NPNR_ASSERT(bel != BelId());
@@ -165,7 +196,7 @@ template <typename R> struct BaseArch : ArchAPI<R>
     {
         return empty_if_possible<typename R::WireAttrsRangeT>();
     }
-    virtual uint32_t getWireChecksum(WireId wire) const override { return uint32_t(std::hash<WireId>()(wire)); }
+    virtual uint32_t getWireChecksum(WireId wire) const override { return wire.hash(); }
 
     virtual void bindWire(WireId wire, NetInfo *net, PlaceStrength strength) override
     {
@@ -213,7 +244,7 @@ template <typename R> struct BaseArch : ArchAPI<R>
     {
         return empty_if_possible<typename R::PipAttrsRangeT>();
     }
-    virtual uint32_t getPipChecksum(PipId pip) const override { return uint32_t(std::hash<PipId>()(pip)); }
+    virtual uint32_t getPipChecksum(PipId pip) const override { return pip.hash(); }
     virtual void bindPip(PipId pip, NetInfo *net, PlaceStrength strength) override
     {
         NPNR_ASSERT(pip != PipId());
@@ -343,28 +374,90 @@ template <typename R> struct BaseArch : ArchAPI<R>
         return return_if_match<const std::vector<BelId> &, typename R::BucketBelRangeT>(bucket_bels.at(bucket));
     }
 
+    // Cluster methods
+    virtual CellInfo *getClusterRootCell(ClusterId cluster) const override { return get_cluster_root(this, cluster); }
+
+    virtual ArcBounds getClusterBounds(ClusterId cluster) const override
+    {
+        return if_using_basecluster<ArcBounds>(get_cluster_root(this, cluster), [](const BaseClusterInfo *cluster) {
+            ArcBounds bounds(0, 0, 0, 0);
+            for (auto child : cluster->constr_children) {
+                if_using_basecluster<void>(child, [&](const BaseClusterInfo *child) {
+                    bounds.x0 = std::min(bounds.x0, child->constr_x);
+                    bounds.y0 = std::min(bounds.y0, child->constr_y);
+                    bounds.x1 = std::max(bounds.x1, child->constr_x);
+                    bounds.y1 = std::max(bounds.y1, child->constr_y);
+                });
+            }
+            return bounds;
+        });
+    }
+
+    virtual Loc getClusterOffset(const CellInfo *cell) const override
+    {
+        return if_using_basecluster<Loc>(cell,
+                                         [](const BaseClusterInfo *c) { return Loc(c->constr_x, c->constr_y, 0); });
+    }
+
+    virtual bool isClusterStrict(const CellInfo *cell) const override { return true; }
+
+    virtual bool getClusterPlacement(ClusterId cluster, BelId root_bel,
+                                     std::vector<std::pair<CellInfo *, BelId>> &placement) const override
+    {
+        CellInfo *root_cell = get_cluster_root(this, cluster);
+        return if_using_basecluster<bool>(root_cell, [&](const BaseClusterInfo *cluster) -> bool {
+            placement.clear();
+            NPNR_ASSERT(root_bel != BelId());
+            Loc root_loc = this->getBelLocation(root_bel);
+
+            if (cluster->constr_abs_z) {
+                // Coerce root to absolute z constraint
+                root_loc.z = cluster->constr_z;
+                root_bel = this->getBelByLocation(root_loc);
+                if (root_bel == BelId() || !this->isValidBelForCellType(root_cell->type, root_bel))
+                    return false;
+            }
+            placement.emplace_back(root_cell, root_bel);
+
+            for (auto child : cluster->constr_children) {
+                Loc child_loc = if_using_basecluster<Loc>(child, [&](const BaseClusterInfo *child) {
+                    Loc result;
+                    result.x = root_loc.x + child->constr_x;
+                    result.y = root_loc.y + child->constr_y;
+                    result.z = child->constr_abs_z ? child->constr_z : (root_loc.z + child->constr_z);
+                    return result;
+                });
+                BelId child_bel = this->getBelByLocation(child_loc);
+                if (child_bel == BelId() || !this->isValidBelForCellType(child->type, child_bel))
+                    return false;
+                placement.emplace_back(child, child_bel);
+            }
+            return true;
+        });
+    }
+
     // Flow methods
     virtual void assignArchInfo() override{};
 
     // --------------------------------------------------------------
     // These structures are used to provide default implementations of bel/wire/pip binding. Arches might want to
-    // replace them with their own, for example to use faster access structures than unordered_map. Arches might also
+    // replace them with their own, for example to use faster access structures than dict. Arches might also
     // want to add extra checks around these functions
-    std::unordered_map<BelId, CellInfo *> base_bel2cell;
-    std::unordered_map<WireId, NetInfo *> base_wire2net;
-    std::unordered_map<PipId, NetInfo *> base_pip2net;
+    dict<BelId, CellInfo *> base_bel2cell;
+    dict<WireId, NetInfo *> base_wire2net;
+    dict<PipId, NetInfo *> base_pip2net;
 
     // For the default cell/bel bucket implementations
     std::vector<IdString> cell_types;
     std::vector<BelBucketId> bel_buckets;
-    std::unordered_map<BelBucketId, std::vector<BelId>> bucket_bels;
+    dict<BelBucketId, std::vector<BelId>> bucket_bels;
 
     // Arches that want to use the default cell types and bel buckets *must* call these functions in their constructor
     bool cell_types_initialised = false;
     bool bel_buckets_initialised = false;
     void init_cell_types()
     {
-        std::unordered_set<IdString> bel_types;
+        pool<IdString> bel_types;
         for (auto bel : this->getBels())
             bel_types.insert(this->getBelType(bel));
         std::copy(bel_types.begin(), bel_types.end(), std::back_inserter(cell_types));

@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2019  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2019  gatecat <gatecat@ds0.me>
  *  Copyright (C) 2020  Pepijn de Vos <pepijn@symbioticeda.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -87,7 +87,7 @@ void lut_to_lc(const Context *ctx, CellInfo *lut, CellInfo *lc, bool no_dff = tr
 void dff_to_lc(const Context *ctx, CellInfo *dff, CellInfo *lc, bool pass_thru_lut = false);
 
 // Convert a Gowin IO buffer to a IOB bel
-void gwio_to_iob(Context *ctx, CellInfo *nxio, CellInfo *sbio, std::unordered_set<IdString> &todelete_cells);
+void gwio_to_iob(Context *ctx, CellInfo *nxio, CellInfo *sbio, pool<IdString> &todelete_cells);
 
 NEXTPNR_NAMESPACE_END
 

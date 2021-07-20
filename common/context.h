@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -37,7 +37,15 @@ struct Context : Arch, DeterministicRNG
     // Should we disable printing of the location of nets in the critical path?
     bool disable_critical_path_source_print = false;
 
-    Context(ArchArgs args) : Arch(args) { BaseCtx::as_ctx = this; }
+    ArchArgs arch_args;
+
+    Context(ArchArgs args) : Arch(args)
+    {
+        BaseCtx::as_ctx = this;
+        arch_args = args;
+    }
+
+    ArchArgs getArchArgs() { return arch_args; }
 
     // --------------------------------------------------------------
 
@@ -50,7 +58,7 @@ struct Context : Arch, DeterministicRNG
     // provided by router1.cc
     bool checkRoutedDesign() const;
     bool getActualRouteDelay(WireId src_wire, WireId dst_wire, delay_t *delay = nullptr,
-                             std::unordered_map<WireId, PipId> *route = nullptr, bool useEstimate = true);
+                             dict<WireId, PipId> *route = nullptr, bool useEstimate = true);
 
     // --------------------------------------------------------------
     // call after changing hierpath or adding/removing nets and cells

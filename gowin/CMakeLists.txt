@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.5)
 project(chipdb-gowin NONE)
 
-set(ALL_GOWIN_DEVICES GW1N-1 GW1N-4 GW1N-9)
+set(ALL_GOWIN_DEVICES GW1N-1 GW1N-4 GW1N-9 GW1NS-2)
 set(GOWIN_DEVICES ${ALL_GOWIN_DEVICES} CACHE STRING
     "Include support for these Gowin devices (available: ${ALL_GOWIN_DEVICES})")
 message(STATUS "Enabled Gowin devices: ${GOWIN_DEVICES}")
@@ -12,8 +12,6 @@ message(STATUS "gowin_bba executable: ${GOWIN_BBA_EXECUTABLE}")
 if(DEFINED GOWIN_CHIPDB)
     add_custom_target(chipdb-gowin-bbas ALL)
 else()
-    find_package(PythonInterp 3.6 REQUIRED)
-
     # shared among all families
     set(SERIALIZE_CHIPDBS TRUE CACHE BOOL
         "Serialize device data preprocessing to minimize memory use")

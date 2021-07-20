@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -389,8 +389,8 @@ struct FixupHierarchyWorker
     // Update hierarchy structure for nets and cells that have hiercell set
     void rebuild_hierarchy()
     {
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (ci->hierpath == IdString())
                 ci->hierpath = ctx->top_module;
             auto &hc = ctx->hierarchy.at(ci->hierpath);

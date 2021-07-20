@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -227,9 +227,8 @@ struct NexusFasmWriter
         blank();
     }
     // Find the CIBMUX output for a signal
-    WireId find_cibmux(const CellInfo *cell, IdString pin)
+    WireId find_cibmux(WireId cursor)
     {
-        WireId cursor = ctx->getBelPinWire(cell->bel, pin);
         if (cursor == WireId())
             return WireId();
         for (int i = 0; i < 10; i++) {
@@ -248,7 +247,7 @@ struct NexusFasmWriter
     // Write out the mux config for a cell
     void write_cell_muxes(const CellInfo *cell)
     {
-        for (auto port : sorted_cref(cell->ports)) {
+        for (auto &port : cell->ports) {
             // Only relevant to inputs
             if (port.second.type != PORT_IN)
                 continue;
@@ -270,7 +269,7 @@ struct NexusFasmWriter
             // Handle CIB muxes - these must be set such that floating pins really are floating to VCC and not connected
             // to another CIB signal
             if ((pin_style & PINBIT_CIBMUX) && port.second.net == nullptr) {
-                WireId cibmuxout = find_cibmux(cell, port.first);
+                WireId cibmuxout = find_cibmux(ctx->getBelPinWire(cell->bel, port.first));
                 if (cibmuxout != WireId()) {
                     write_comment(stringf("CIBMUX for unused pin %s", ctx->nameOf(port.first)));
                     bool found = false;
@@ -284,6 +283,35 @@ struct NexusFasmWriter
                     NPNR_ASSERT(found);
                 }
             }
+        }
+    }
+
+    // Handle route-through DCCs
+    void write_dcc_thru()
+    {
+        for (auto bel : ctx->getBels()) {
+            if (ctx->getBelType(bel) != id_DCC)
+                continue;
+            if (!ctx->checkBelAvail(bel))
+                continue;
+            WireId dst = ctx->getBelPinWire(bel, id_CLKO);
+            if (ctx->getBoundWireNet(dst) == nullptr)
+                continue;
+            // Set up the CIBMUX so CE is guaranteed to be tied high
+            WireId ce = ctx->getBelPinWire(bel, id_CE);
+            WireId cibmuxout = find_cibmux(ce);
+            NPNR_ASSERT(cibmuxout != WireId());
+
+            write_comment(stringf("CE CIBMUX for DCC route-thru %s", ctx->nameOfBel(bel)));
+            bool found = false;
+            for (PipId pip : ctx->getPipsUphill(cibmuxout)) {
+                if (ctx->checkPipAvail(pip) && ctx->checkWireAvail(ctx->getPipSrcWire(pip))) {
+                    write_pip(pip);
+                    found = true;
+                    break;
+                }
+            }
+            NPNR_ASSERT(found);
         }
     }
 
@@ -336,7 +364,7 @@ struct NexusFasmWriter
         pop(2);
     }
 
-    std::unordered_set<BelId> used_io;
+    pool<BelId> used_io;
 
     struct BankConfig
     {
@@ -539,7 +567,7 @@ struct NexusFasmWriter
         push_bel(bel);
         if (cell->type != id_MULT18_CORE && cell->type != id_MULT18X36_CORE && cell->type != id_MULT36_CORE)
             write_bit(stringf("MODE.%s", ctx->nameOf(cell->type)));
-        for (auto param : sorted_cref(cell->params)) {
+        for (auto &param : cell->params) {
             const std::string &param_name = param.first.str(ctx);
             if (is_mux_param(param_name))
                 continue;
@@ -556,7 +584,7 @@ struct NexusFasmWriter
 
     // Which PLL params are 'word' values
     /* clang-format off */
-    const std::unordered_map<std::string, int> pll_word_params = {
+    const dict<std::string, int> pll_word_params = {
             {"DIVA", 7}, {"DELA", 7}, {"PHIA", 3}, {"DIVB", 7},
             {"DELB", 7}, {"PHIB", 3}, {"DIVC", 7}, {"DELC", 7},
             {"PHIC", 3}, {"DIVD", 7}, {"DELD", 7}, {"PHID", 3},
@@ -582,7 +610,7 @@ struct NexusFasmWriter
     };
 
     // Which MIPI params are 'word' values
-    const std::unordered_map<std::string, int> dphy_word_params = {
+    const dict<std::string, int> dphy_word_params = {
             {"CM", 8}, {"CN", 5}, {"CO", 3}, {"RSEL", 2}, {"RXCDRP", 2},
             {"RXDATAWIDTHHS", 2}, {"RXLPRP", 3}, {"TEST_ENBL", 6},
             {"TEST_PATTERN", 32}, {"TST", 4}, {"TXDATAWIDTHHS", 2},
@@ -601,7 +629,7 @@ struct NexusFasmWriter
         write_cell_muxes(cell);
         pop();
         push(stringf("IP_%s", ctx->nameOf(IdString(ctx->bel_data(bel).name))));
-        for (auto param : sorted_cref(cell->params)) {
+        for (auto &param : cell->params) {
             const std::string &name = param.first.str(ctx);
             if (is_mux_param(name) || name == "CLKMUX_FB" || name == "SEL_FBK")
                 continue;
@@ -622,7 +650,7 @@ struct NexusFasmWriter
     {
         BelId bel = cell->bel;
         push(stringf("IP_%s", ctx->nameOf(IdString(ctx->bel_data(bel).name))));
-        for (auto param : sorted_cref(cell->params)) {
+        for (auto &param : cell->params) {
             const std::string &name = param.first.str(ctx);
             if (is_mux_param(name) || name == "GSR")
                 continue;
@@ -657,6 +685,8 @@ struct NexusFasmWriter
         blank();
 
         Loc l = ctx->getBelLocation(bel);
+        if (is_lifcl_17 && l.x == 0)
+            l.x = 1;
         push(stringf("IP_LRAM_CORE_R%dC%d", l.y, l.x));
         for (int i = 0; i < 128; i++) {
             IdString param = ctx->id(stringf("INITVAL_%02X", i));
@@ -683,7 +713,7 @@ struct NexusFasmWriter
         write_comment("# Unused bels");
 
         // DSP primitives are configured to a default mode; even if unused
-        static const std::unordered_map<IdString, std::vector<std::string>> dsp_defconf = {
+        static const dict<IdString, std::vector<std::string>> dsp_defconf = {
                 {id_MULT9_CORE,
                  {
                          "GSR.ENABLED",
@@ -733,7 +763,7 @@ struct NexusFasmWriter
             }
         }
     }
-    std::unordered_map<int, int> bank_vcco;
+    dict<int, int> bank_vcco;
     // bank VccO in mV
     int get_bank_vcco(const std::string &iostd)
     {
@@ -753,8 +783,8 @@ struct NexusFasmWriter
     // Write out placeholder bankref config
     void write_bankcfg()
     {
-        for (auto c : sorted(ctx->cells)) {
-            const CellInfo *ci = c.second;
+        for (auto &c : ctx->cells) {
+            const CellInfo *ci = c.second.get();
             if (ci->type != id_SEIO33_CORE)
                 continue;
             if (!ci->attrs.count(id_IO_TYPE))
@@ -809,12 +839,12 @@ struct NexusFasmWriter
         write_attribute("oxide.device_variant", ctx->variant);
         blank();
         // Write routing
-        for (auto n : sorted(ctx->nets)) {
-            write_net(n.second);
+        for (auto &n : ctx->nets) {
+            write_net(n.second.get());
         }
         // Write cell config
-        for (auto c : sorted(ctx->cells)) {
-            const CellInfo *ci = c.second;
+        for (auto &c : ctx->cells) {
+            const CellInfo *ci = c.second.get();
             write_comment(stringf("# Cell %s", ctx->nameOf(ci)));
             if (ci->type == id_OXIDE_COMB)
                 write_comb(ci);
@@ -844,6 +874,8 @@ struct NexusFasmWriter
                 write_dphy(ci);
             blank();
         }
+        // Handle DCC route-throughs
+        write_dcc_thru();
         // Write config for unused bels
         write_unused();
         // Write bank config

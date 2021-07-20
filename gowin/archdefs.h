@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Claire Wolf <claire@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
  *  Copyright (C) 2020  Pepijn de Vos <pepijn@symbioticeda.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -21,6 +21,7 @@
 #ifndef GOWIN_ARCHDEFS_H
 #define GOWIN_ARCHDEFS_H
 
+#include "base_clusterinfo.h"
 #include "idstring.h"
 #include "nextpnr_namespaces.h"
 
@@ -48,6 +49,7 @@ typedef IdString PipId;
 typedef IdString GroupId;
 typedef IdString DecalId;
 typedef IdString BelBucketId;
+typedef IdString ClusterId;
 
 struct ArchNetInfo
 {
@@ -55,7 +57,7 @@ struct ArchNetInfo
 
 struct NetInfo;
 
-struct ArchCellInfo
+struct ArchCellInfo : BaseClusterInfo
 {
     // Is the flip-flop of this slice used
     bool ff_used;

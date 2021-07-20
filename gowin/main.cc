@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Claire Wolf <claire@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
  *  Copyright (C) 2020  Pepijn de Vos <pepijn@symbioticeda.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -34,7 +34,7 @@ class GowinCommandHandler : public CommandHandler
   public:
     GowinCommandHandler(int argc, char **argv);
     virtual ~GowinCommandHandler(){};
-    std::unique_ptr<Context> createContext(std::unordered_map<std::string, Property> &values) override;
+    std::unique_ptr<Context> createContext(dict<std::string, Property> &values) override;
     void setupArchContext(Context *ctx) override{};
     void customAfterLoad(Context *ctx) override;
 
@@ -52,9 +52,9 @@ po::options_description GowinCommandHandler::getArchOptions()
     return specific;
 }
 
-std::unique_ptr<Context> GowinCommandHandler::createContext(std::unordered_map<std::string, Property> &values)
+std::unique_ptr<Context> GowinCommandHandler::createContext(dict<std::string, Property> &values)
 {
-    std::regex devicere = std::regex("GW1N([A-Z]*)-(LV|UV)([0-9])([A-Z]{2}[0-9]+)(C[0-9]/I[0-9])");
+    std::regex devicere = std::regex("GW1N([A-Z]*)-(LV|UV|UX)([0-9])(C?)([A-Z]{2}[0-9]+)(C[0-9]/I[0-9])");
     std::smatch match;
     std::string device = vm["device"].as<std::string>();
     if (!std::regex_match(device, match, devicere)) {
@@ -62,12 +62,19 @@ std::unique_ptr<Context> GowinCommandHandler::createContext(std::unordered_map<s
     }
     ArchArgs chipArgs;
     char buf[36];
-    snprintf(buf, 36, "GW1N%s-%s", match[1].str().c_str(), match[3].str().c_str());
+    snprintf(buf, 36, "GW1N%s-%s%s", match[1].str().c_str(), match[3].str().c_str(), match[4].str().c_str());
     chipArgs.device = buf;
-    snprintf(buf, 36, "GW1N-%s", match[3].str().c_str());
+    // GW1N and GW1NR variants share the same database.
+    // Most Gowin devices are a System in Package with some SDRAM wirebonded to a GPIO bank.
+    // However, it appears that the S series with embedded ARM core are unique silicon.
+    if(match[1].str() == "S") {
+        snprintf(buf, 36, "GW1NS-%s", match[3].str().c_str());
+    } else {
+        snprintf(buf, 36, "GW1N-%s", match[3].str().c_str());
+    }
     chipArgs.family = buf;
-    chipArgs.package = match[4];
-    chipArgs.speed = match[5];
+    chipArgs.package = match[5];
+    chipArgs.speed = match[6];
     return std::unique_ptr<Context>(new Context(chipArgs));
 }
 

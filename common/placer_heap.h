@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2019  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2019  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -46,10 +46,10 @@ struct PlacerHeapCfg
     int spread_scale_x, spread_scale_y;
 
     // These cell types will be randomly locked to prevent singular matrices
-    std::unordered_set<IdString> ioBufTypes;
+    pool<IdString> ioBufTypes;
     // These cell types are part of the same unit (e.g. slices split into
     // components) so will always be spread together
-    std::vector<std::unordered_set<BelBucketId>> cellGroups;
+    std::vector<pool<BelBucketId>> cellGroups;
 };
 
 extern bool placer_heap(Context *ctx, PlacerHeapCfg cfg);

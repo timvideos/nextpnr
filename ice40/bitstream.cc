@@ -1,9 +1,9 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -252,7 +252,7 @@ static BelPin get_one_bel_pin(const Context *ctx, WireId wire)
 }
 
 // Permute LUT init value given map (LUT input -> ext input)
-unsigned permute_lut(unsigned orig_init, const std::unordered_map<int, int> &input_permute)
+unsigned permute_lut(unsigned orig_init, const dict<int, int> &input_permute)
 {
     unsigned new_init = 0;
 
@@ -387,8 +387,8 @@ void write_asc(const Context *ctx, std::ostream &out)
     }
 
     // Scan for PLL and collects the affected SB_IOs
-    std::unordered_set<Loc> sb_io_used_by_pll_out;
-    std::unordered_set<Loc> sb_io_used_by_pll_pad;
+    pool<Loc> sb_io_used_by_pll_out;
+    pool<Loc> sb_io_used_by_pll_pad;
 
     for (auto &cell : ctx->cells) {
         if (cell.second->type != ctx->id("ICESTORM_PLL"))
@@ -447,7 +447,7 @@ void write_asc(const Context *ctx, std::ostream &out)
             std::vector<bool> lc(20, false);
 
             // Discover permutation
-            std::unordered_map<int, int> input_perm;
+            dict<int, int> input_perm;
             std::set<int> unused;
             for (int i = 0; i < 4; i++)
                 unused.insert(i);

@@ -5,13 +5,14 @@ nextpnr aims to be a vendor neutral, timing driven, FOSS FPGA place and route
 tool.
 
 Currently nextpnr supports:
- * Lattice iCE40 devices supported by [Project IceStorm](http://www.clifford.at/icestorm/)
+ * Lattice iCE40 devices supported by [Project IceStorm](http://bygone.clairexen.net/icestorm/)
  * Lattice ECP5 devices supported by [Project Trellis](https://github.com/YosysHQ/prjtrellis)
  * Lattice Nexus devices supported by [Project Oxide](https://github.com/gatecat/prjoxide)
  * Gowin LittleBee devices supported by [Project Apicula](https://github.com/YosysHQ/apicula)
+ * *(experimental)* Cyclone V devices supported by [Mistral](https://github.com/Ravenslofty/mistral)
  * *(experimental)* a "generic" back-end for user-defined architectures
 
-There is some work in progress towards [support for Xilinx devices](https://github.com/daveshah1/nextpnr-xilinx/) but it is not upstream and not intended for end users at the present time. We hope to see more FPGA families supported in the future. We would love your help in developing this awesome new project!
+There is some work in progress towards [support for Xilinx devices](https://github.com/gatecat/nextpnr-xilinx/) but it is not upstream and not intended for end users at the present time. We hope to see more FPGA families supported in the future. We would love your help in developing this awesome new project!
 
 A brief (academic) paper describing the Yosys+nextpnr flow can be found
 on [arXiv](https://arxiv.org/abs/1903.10407).
@@ -52,7 +53,7 @@ Getting started
 
 ### nextpnr-ice40
 
-For iCE40 support, install [Project IceStorm](http://www.clifford.at/icestorm/) to `/usr/local` or another location, which should be passed as `-DICESTORM_INSTALL_PREFIX=/usr` to CMake. Then build and install `nextpnr-ice40` using the following commands:
+For iCE40 support, install [Project IceStorm](http://bygone.clairexen.net/icestorm/) to `/usr/local` or another location, which should be passed as `-DICESTORM_INSTALL_PREFIX=/usr` to CMake. Then build and install `nextpnr-ice40` using the following commands:
 
 ```
 cmake . -DARCH=ice40
@@ -117,10 +118,10 @@ Nexus support is currently experimental, and has only been tested with engineeri
 
 ### nextpnr-gowin
 
-For Gowin support, install [Project Apicula](https://github.com/YosysHQ/apicula). If a virtualenv is used, the python paths need to be provided as follows:
+For Gowin support, install [Project Apicula](https://github.com/YosysHQ/apicula). If a virtualenv is used, the path to `gowin_bba` needs to be provided as follows:
 
 ```
-cmake . -DARCH=gowin -DPYTHON_EXECUTABLE=path -DGOWIN_BBA_EXECUTABLE=path
+cmake . -DARCH=gowin -DGOWIN_BBA_EXECUTABLE=path
 make -j$(nproc)
 sudo make install
 ```
@@ -243,13 +244,13 @@ Links and references
 
 ### Synthesis, simulation, and logic optimization
 
-- [Yosys](http://www.clifford.at/yosys/)
+- [Yosys](https://yosyshq.net/yosys/)
 - [Icarus Verilog](http://iverilog.icarus.com/)
 - [ABC](https://people.eecs.berkeley.edu/~alanmi/abc/)
 
 ### FPGA bitstream documentation (and tools) projects
 
-- [Project IceStorm (Lattice iCE40)](http://www.clifford.at/icestorm/)
+- [Project IceStorm (Lattice iCE40)](http://bygone.clairexen.net/icestorm/)
 - [Project Trellis (Lattice ECP5)](https://yosyshq.github.io/prjtrellis-db/)
 - [Project X-Ray (Xilinx 7-Series)](https://symbiflow.github.io/prjxray-db/)
 - [Project Chibi (Intel MAX-V)](https://github.com/rqou/project-chibi)

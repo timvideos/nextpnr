@@ -45,27 +45,31 @@ A scalar type that is used to  represent delays. May be an integer or float type
 
 ### BelId
 
-A type representing a bel name. `BelId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a specialization for `std::hash<BelId>`.
+A type representing a bel name. `BelId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a `unsigned int hash() const` member function.
 
 ### WireId
 
-A type representing a wire name. `WireId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a specialization for `std::hash<WireId>`.
+A type representing a wire name. `WireId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a `unsigned int hash() const` member function.
 
 ### PipId
 
-A type representing a pip name. `PipId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a specialization for `std::hash<PipId>`.
+A type representing a pip name. `PipId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a `unsigned int hash() const` member function.
 
 ### BelBucketId
 
-A type representing a bel bucket. `BelBucketId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a specialization for `std::hash<BelBucketId>`.
+A type representing a bel bucket. `BelBucketId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a `unsigned int hash() const` member function.
 
 ### GroupId
 
-A type representing a group name. `GroupId()` must construct a unique null-value. Must provide `==` and `!=` operators and a specialization for `std::hash<GroupId>`.
+A type representing a group name. `GroupId()` must construct a unique null-value. Must provide `==` and `!=` operators and a `unsigned int hash() const` member function.
 
 ### DecalId
 
-A type representing a reference to a graphical decal. `DecalId()` must construct a unique null-value. Must provide `==` and `!=` operators and a specialization for `std::hash<DecalId>`.
+A type representing a reference to a graphical decal. `DecalId()` must construct a unique null-value. Must provide `==` and `!=` operators and a `unsigned int hash() const` member function.
+
+### ClusterId
+
+A type representing a reference to a constrained cluster of cells. `ClusterId()` must construct a unique null-value. Must provide `==` and `!=` operators and `unsigned int hash() const` member function.
 
 ### ArchNetInfo
 
@@ -167,7 +171,7 @@ Returns true if the given bel is a global buffer. A global buffer does not "pull
 
 Return a (preferably unique) number that represents this bel. This is used in design state checksum calculations.
 
-*BaseArch default: returns `std::hash` of `BelId` cast to `uint32_t`*
+*BaseArch default: returns `bel.hash()`*
 
 ### void bindBel(BelId bel, CellInfo \*cell, PlaceStrength strength)
 
@@ -272,7 +276,7 @@ unused. An implementation may simply return an empty range.
 
 Return a (preferably unique) number that represents this wire. This is used in design state checksum calculations.
 
-*BaseArch default: returns `std::hash` of `WireId` cast to `uint32_t`*
+*BaseArch default: returns `wire.hash()`*
 
 ### void bindWire(WireId wire, NetInfo \*net, PlaceStrength strength)
 
@@ -370,7 +374,7 @@ for pips a X/Y/Z location refers to a group of pips, not an individual pip.
 
 Return a (preferably unique) number that represents this pip. This is used in design state checksum calculations.
 
-*BaseArch default: returns `std::hash` of `WireId` cast to `uint32_t`*
+*BaseArch default: returns `pip.hash()`*
 
 ### void bindPip(PipId pip, NetInfo \*net, PlaceStrength strength)
 
@@ -720,3 +724,32 @@ Name of the default router algorithm for the architecture, if
 
 Name of available router algorithms for the architecture, used
 to provide help for and validate `--router`.
+
+Cluster Methods
+---------------
+
+### CellInfo *getClusterRootCell(ClusterId cluster) const
+
+Gets the root cell of a cluster, which is used as a datum point when placing the cluster.
+
+### ArcBounds getClusterBounds(ClusterId cluster) const
+
+Gets an approximate bounding box of the cluster. This is intended for area allocation in the placer and is permitted to occasionally give incorrect estimates, for example due to irregularities in the fabric depending on cluster placement. `getClusterPlacement` should always be used to get exact locations.
+
+### Loc getClusterOffset(const CellInfo \*cell) const
+
+Gets the approximate offset of a cell within its cluster, relative to the root cell. This is intended for global placement usage and is permitted to occasionally give incorrect estimates, for example due to irregularities in the fabric depending on cluster placement. `getClusterPlacement` should always be used to get exact locations.
+
+The returned x and y coordinates, when added to the root location of the cluster, should give an approximate location where `cell` will end up placed at.
+
+### bool isClusterStrict(const CellInfo *cell) const
+
+Returns `true` if the cell **must** be placed according to the cluster; for example typical carry chains, and dedicated IO routing. Returns `false` if the cell can be split from the cluster if placement desires, at the expense of a less optimal result (for example dedicated LUT-FF paths where general routing can also be used).
+
+### bool getClusterPlacement(ClusterId cluster, BelId root\_bel, std::vector\<std::pair\<CellInfo \*, BelId\>\> &placement) const
+
+Gets an exact placement of the cluster, with the root cell placed on or near `root_bel` (and always within the same tile). Returns false if no placement is viable, otherwise returns `true` and populates `placement` with a list of cells inside the cluster and bels they should be placed at.
+
+This approach of allowing architectures to define cluster placements enables easier handling of irregular fabrics than requiring strict and constant x, y and z offsets.
+
+

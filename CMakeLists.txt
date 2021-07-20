@@ -20,7 +20,6 @@ option(EXTERNAL_CHIPDB "Create build with pre-built chipdb binaries" OFF)
 option(WERROR "pass -Werror to compiler (used for CI)" OFF)
 option(PROFILER "Link against libprofiler" OFF)
 option(USE_IPO "Compile nextpnr with IPO" ON)
-option(USE_ABSEIL "Compile nextpnr with Abseil for faster hash map" OFF)
 
 if (USE_IPO)
     if (ipo_supported)
@@ -95,9 +94,9 @@ endif()
 set(PROGRAM_PREFIX "" CACHE STRING "Name prefix for executables")
 
 # List of families to build
-set(FAMILIES generic ice40 ecp5 nexus gowin fpga_interchange machxo2)
+set(FAMILIES generic ice40 ecp5 nexus gowin fpga_interchange machxo2 mistral)
 set(STABLE_FAMILIES generic ice40 ecp5)
-set(EXPERIMENTAL_FAMILIES nexus gowin fpga_interchange machxo2)
+set(EXPERIMENTAL_FAMILIES nexus gowin fpga_interchange machxo2 mistral)
 
 set(ARCH "" CACHE STRING "Architecture family for nextpnr build")
 set_property(CACHE ARCH PROPERTY STRINGS ${FAMILIES})
@@ -199,10 +198,6 @@ if (NOT DEFINED CURRENT_GIT_VERSION)
     )
 endif()
 
-if (USE_ABSEIL)
-    add_subdirectory(3rdparty/abseil-cpp EXCLUDE_FROM_ALL)
-endif()
-
 if (BUILD_TESTS)
     add_subdirectory(3rdparty/googletest/googletest ${CMAKE_CURRENT_BINARY_DIR}/generated/3rdparty/googletest EXCLUDE_FROM_ALL)
     enable_testing()
@@ -252,13 +247,7 @@ else()
 endif()
 
 set(EXTRA_LIB_DEPS)
-if (USE_ABSEIL)
-    if (NOT USE_THREADS)
-        message(FATAL_ERROR "Abseil without threads is not supported")
-    endif()
-    list(APPEND EXTRA_LIB_DEPS absl::flat_hash_map)
-    list(APPEND EXTRA_LIB_DEPS absl::flat_hash_set)
-endif()
+
 if(PROFILER)
     list(APPEND EXTRA_LIB_DEPS profiler)
 endif()
@@ -336,9 +325,6 @@ foreach (family ${ARCH})
             target_compile_definitions(${target} PRIVATE QT_NO_KEYWORDS)
             target_link_libraries(${target} LINK_PUBLIC gui_${family} ${GUI_LIBRARY_FILES_${ufamily}})
         endif()
-        if (USE_ABSEIL)
-            target_compile_definitions(${target} PRIVATE USE_ABSEIL)
-        endif()
         if (BUILD_PYTHON)
             target_link_libraries(${target} LINK_PUBLIC ${PYTHON_LIBRARIES})
             if (STATIC_BUILD)
@@ -360,6 +346,7 @@ string(REGEX REPLACE "[^;]*nexus/chipdb/chipdb-[^;]*.cc" "" CLANGFORMAT_FILES "$
 string(REGEX REPLACE "[^;]*/machxo2/chipdb/chipdb-[^;]*.cc" "" CLANGFORMAT_FILES "${CLANGFORMAT_FILES}")
 string(REGEX REPLACE "[^;]*/3rdparty[^;]*" "" CLANGFORMAT_FILES "${CLANGFORMAT_FILES}")
 string(REGEX REPLACE "[^;]*/generated[^;]*" "" CLANGFORMAT_FILES "${CLANGFORMAT_FILES}")
+string(REGEX REPLACE "[^;]*/libmistral/[^;]*" "" CLANGFORMAT_FILES "${CLANGFORMAT_FILES}")
 
 add_custom_target(
     clangformat

@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -32,10 +32,7 @@ struct NexusPostPlaceOpt
 
     NexusPostPlaceOpt(Context *ctx) : ctx(ctx), tmg(ctx){};
 
-    inline bool is_constrained(CellInfo *cell)
-    {
-        return cell->constr_parent != nullptr || !cell->constr_children.empty();
-    }
+    inline bool is_constrained(CellInfo *cell) { return cell->cluster != ClusterId(); }
 
     bool swap_cell_placement(CellInfo *cell, BelId new_bel)
     {
@@ -91,9 +88,9 @@ struct NexusPostPlaceOpt
     void opt_lutffs()
     {
         int moves_made = 0;
-        for (auto cell : sorted(ctx->cells)) {
+        for (auto &cell : ctx->cells) {
             // Search for FF cells
-            CellInfo *ff = cell.second;
+            CellInfo *ff = cell.second.get();
             if (ff->type != id_OXIDE_FF)
                 continue;
             // Check M ('fabric') input net

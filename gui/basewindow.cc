@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -30,6 +30,7 @@
 #include <fstream>
 #include "designwidget.h"
 #include "fpgaviewwidget.h"
+#include "json_frontend.h"
 #include "jsonwrite.h"
 #include "log.h"
 #include "mainwindow.h"
@@ -364,8 +365,12 @@ void BaseMainWindow::open_json()
     QString fileName = QFileDialog::getOpenFileName(this, QString("Open JSON"), QString(), QString("*.json"));
     if (!fileName.isEmpty()) {
         disableActions();
-        ctx = handler->load_json(fileName.toStdString());
-        Q_EMIT contextChanged(ctx.get());
+        if (ctx->settings.find(ctx->id("synth")) == ctx->settings.end()) {
+            ArchArgs chipArgs = ctx->getArchArgs();
+            ctx = std::unique_ptr<Context>(new Context(chipArgs));
+            Q_EMIT contextChanged(ctx.get());
+        }
+        handler->load_json(ctx.get(), fileName.toStdString());
         Q_EMIT updateTreeView();
         log("Loading design successful.\n");
         updateActions();

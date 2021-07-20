@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -27,6 +27,12 @@
 #endif
 
 USING_NEXTPNR_NAMESPACE
+
+#ifndef ARCH_MISTRAL
+// The LRU cache to reduce memory usage during the connectivity check relies on getPips() having some spacial locality,
+// which the current CycloneV arch impl doesn't have. This may be fixed in the future, though.
+#define USING_LRU_CACHE
+#endif
 
 namespace {
 
@@ -102,7 +108,7 @@ void archcheck_locs(const Context *ctx)
     for (int x = 0; x < ctx->getGridDimX(); x++)
         for (int y = 0; y < ctx->getGridDimY(); y++) {
             dbg("> %d %d\n", x, y);
-            std::unordered_set<int> usedz;
+            pool<int> usedz;
 
             for (int z = 0; z < ctx->getTileBelDimZ(x, y); z++) {
                 BelId bel = ctx->getBelByLocation(Loc(x, y, z));
@@ -156,10 +162,10 @@ struct LruWireCacheMap
     // list is oldest wire in cache.
     std::list<WireId> last_access_list;
     // Quick wire -> list element lookup.
-    std::unordered_map<WireId, std::list<WireId>::iterator> last_access_map;
+    dict<WireId, std::list<WireId>::iterator> last_access_map;
 
-    std::unordered_map<PipId, WireId> pips_downhill;
-    std::unordered_map<PipId, WireId> pips_uphill;
+    dict<PipId, WireId> pips_downhill;
+    dict<PipId, WireId> pips_uphill;
 
     void removeWireFromCache(WireId wire_to_remove)
     {
@@ -248,6 +254,11 @@ void archcheck_conn(const Context *ctx)
 
     log_info("Checking all wires...\n");
 
+#ifndef USING_LRU_CACHE
+    dict<PipId, WireId> pips_downhill;
+    dict<PipId, WireId> pips_uphill;
+#endif
+
     for (WireId wire : ctx->getWires()) {
         for (BelPin belpin : ctx->getWireBelPins(wire)) {
             WireId wire2 = ctx->getBelPinWire(belpin.bel, belpin.pin);
@@ -257,11 +268,19 @@ void archcheck_conn(const Context *ctx)
         for (PipId pip : ctx->getPipsDownhill(wire)) {
             WireId wire2 = ctx->getPipSrcWire(pip);
             log_assert(wire == wire2);
+#ifndef USING_LRU_CACHE
+            auto result = pips_downhill.emplace(pip, wire);
+            log_assert(result.second);
+#endif
         }
 
         for (PipId pip : ctx->getPipsUphill(wire)) {
             WireId wire2 = ctx->getPipDstWire(pip);
             log_assert(wire == wire2);
+#ifndef USING_LRU_CACHE
+            auto result = pips_uphill.emplace(pip, wire);
+            log_assert(result.second);
+#endif
         }
     }
 
@@ -285,7 +304,7 @@ void archcheck_conn(const Context *ctx)
             log_assert(found_belpin);
         }
     }
-
+#ifdef USING_LRU_CACHE
     // This cache is used to meet two goals:
     //  - Avoid linear scan by invoking getPipsDownhill/getPipsUphill directly.
     //  - Avoid having pip -> wire maps for the entire part.
@@ -295,16 +314,25 @@ void archcheck_conn(const Context *ctx)
     // pip -> wire, assuming that pips are returned from getPips with some
     // chip locality.
     LruWireCacheMap pip_cache(ctx, /*cache_size=*/64 * 1024);
+#endif
     log_info("Checking all PIPs...\n");
     for (PipId pip : ctx->getPips()) {
         WireId src_wire = ctx->getPipSrcWire(pip);
         if (src_wire != WireId()) {
+#ifdef USING_LRU_CACHE
             log_assert(pip_cache.isPipDownhill(pip, src_wire));
+#else
+            log_assert(pips_downhill.at(pip) == src_wire);
+#endif
         }
 
         WireId dst_wire = ctx->getPipDstWire(pip);
         if (dst_wire != WireId()) {
+#ifdef USING_LRU_CACHE
             log_assert(pip_cache.isPipUphill(pip, dst_wire));
+#else
+            log_assert(pips_uphill.at(pip) == dst_wire);
+#endif
         }
     }
 }
@@ -319,7 +347,7 @@ void archcheck_buckets(const Context *ctx)
     for (BelBucketId bucket : ctx->getBelBuckets()) {
 
         // Find out which cell types are in this bucket.
-        std::unordered_set<IdString> cell_types_in_bucket;
+        pool<IdString> cell_types_in_bucket;
         for (IdString cell_type : ctx->getCellTypes()) {
             if (ctx->getBelBucketForCellType(cell_type) == bucket) {
                 cell_types_in_bucket.insert(cell_type);
@@ -328,9 +356,9 @@ void archcheck_buckets(const Context *ctx)
 
         // Make sure that all cell types in this bucket have at least one
         // BelId they can be placed at.
-        std::unordered_set<IdString> cell_types_unused;
+        pool<IdString> cell_types_unused;
 
-        std::unordered_set<BelId> bels_in_bucket;
+        pool<BelId> bels_in_bucket;
         for (BelId bel : ctx->getBelsInBucket(bucket)) {
             BelBucketId bucket2 = ctx->getBelBucketForBel(bel);
             log_assert(bucket == bucket2);

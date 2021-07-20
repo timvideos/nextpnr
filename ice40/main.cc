@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -35,7 +35,7 @@ class Ice40CommandHandler : public CommandHandler
   public:
     Ice40CommandHandler(int argc, char **argv);
     virtual ~Ice40CommandHandler(){};
-    std::unique_ptr<Context> createContext(std::unordered_map<std::string, Property> &values) override;
+    std::unique_ptr<Context> createContext(dict<std::string, Property> &values) override;
     void setupArchContext(Context *ctx) override;
     void validate() override;
     void customAfterLoad(Context *ctx) override;
@@ -129,7 +129,7 @@ void Ice40CommandHandler::setupArchContext(Context *ctx)
     }
 }
 
-std::unique_ptr<Context> Ice40CommandHandler::createContext(std::unordered_map<std::string, Property> &values)
+std::unique_ptr<Context> Ice40CommandHandler::createContext(dict<std::string, Property> &values)
 {
     ArchArgs chipArgs;
     chipArgs.type = ArchArgs::NONE;

@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -164,10 +164,10 @@ PYBIND11_EMBEDDED_MODULE(MODULE_NAME, m)
             .def("maxFallDelay", &DelayQuad::maxFallDelay)
             .def("delayPair", &DelayQuad::delayPair);
 
-    typedef std::unordered_map<IdString, Property> AttrMap;
-    typedef std::unordered_map<IdString, PortInfo> PortMap;
-    typedef std::unordered_map<IdString, IdString> IdIdMap;
-    typedef std::unordered_map<IdString, std::unique_ptr<Region>> RegionMap;
+    typedef dict<IdString, Property> AttrMap;
+    typedef dict<IdString, PortInfo> PortMap;
+    typedef dict<IdString, IdString> IdIdMap;
+    typedef dict<IdString, std::unique_ptr<Region>> RegionMap;
 
     py::class_<BaseCtx>(m, "BaseCtx");
 
@@ -218,9 +218,9 @@ PYBIND11_EMBEDDED_MODULE(MODULE_NAME, m)
                       pass_through<PortType>>::def_wrap(pi_cls, "type");
 
     typedef std::vector<PortRef> PortRefVector;
-    typedef std::unordered_map<WireId, PipMap> WireMap;
-    typedef std::unordered_set<BelId> BelSet;
-    typedef std::unordered_set<WireId> WireSet;
+    typedef dict<WireId, PipMap> WireMap;
+    typedef pool<BelId> BelSet;
+    typedef pool<WireId> WireSet;
 
     auto ni_cls = py::class_<ContextualWrapper<NetInfo &>>(m, "NetInfo");
     readwrite_wrapper<NetInfo &, decltype(&NetInfo::name), &NetInfo::name, conv_to_str<IdString>,

@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Claire Wolf <claire@symbioticeda.com>
- *  Copyright (C) 2018-19  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018-19  gatecat <gatecat@ds0.me>
  *  Copyright (C) 2021  Symbiflow Authors
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -63,21 +63,8 @@ struct SiteBelPair
     SiteBelPair(std::string site, IdString bel) : site(site), bel(bel) {}
 
     bool operator==(const SiteBelPair &other) const { return site == other.site && bel == other.bel; }
+    unsigned int hash() const { return mkhash(std::hash<std::string>()(site), bel.hash()); }
 };
-NEXTPNR_NAMESPACE_END
-
-template <> struct std::hash<NEXTPNR_NAMESPACE_PREFIX SiteBelPair>
-{
-    std::size_t operator()(const NEXTPNR_NAMESPACE_PREFIX SiteBelPair &site_bel) const noexcept
-    {
-        std::size_t seed = 0;
-        boost::hash_combine(seed, std::hash<std::string>()(site_bel.site));
-        boost::hash_combine(seed, std::hash<NEXTPNR_NAMESPACE_PREFIX IdString>()(site_bel.bel));
-        return seed;
-    }
-};
-
-NEXTPNR_NAMESPACE_BEGIN
 
 static std::pair<std::string, std::string> split_identifier_name_dot(const std::string &name)
 {
@@ -180,7 +167,7 @@ Arch::Arch(ArchArgs args) : args(args), disallow_site_routing(false)
         }
     }
 
-    std::unordered_set<SiteBelPair> site_bel_pads;
+    pool<SiteBelPair> site_bel_pads;
     for (const auto &package_pin : chip_info->packages[package_index].pins) {
         IdString site(package_pin.site);
         IdString bel(package_pin.bel);
@@ -461,7 +448,50 @@ WireId Arch::getWireByName(IdStringList name) const
     return ret;
 }
 
-IdString Arch::getWireType(WireId wire) const { return id(""); }
+IdString Arch::getWireType(WireId wire) const
+{
+    int tile = wire.tile, index = wire.index;
+    if (tile == -1) {
+        // Nodal wire
+        const TileWireRefPOD &wr = chip_info->nodes[wire.index].tile_wires[0];
+        tile = wr.tile;
+        index = wr.index;
+    }
+    auto &w2t = chip_info->tiles[tile].tile_wire_to_type;
+    if (index >= w2t.ssize())
+        return IdString();
+    int wire_type = w2t[index];
+    if (wire_type == -1)
+        return IdString();
+    return IdString(chip_info->wire_types[wire_type].name);
+}
+
+bool Arch::is_site_wire(WireId wire) const
+{
+    if (wire.tile == -1)
+        return false;
+    const auto &tile_type = loc_info(chip_info, wire);
+    return tile_type.wire_data[wire.index].site != -1;
+}
+
+WireCategory Arch::get_wire_category(WireId wire) const
+{
+    int tile = wire.tile, index = wire.index;
+    if (tile == -1) {
+        // Nodal wire
+        const TileWireRefPOD &wr = chip_info->nodes[wire.index].tile_wires[0];
+        tile = wr.tile;
+        index = wr.index;
+    }
+    auto &w2t = chip_info->tiles[tile].tile_wire_to_type;
+    if (index >= w2t.ssize())
+        return WIRE_CAT_GENERAL;
+    int wire_type = w2t[index];
+    if (wire_type == -1)
+        return WIRE_CAT_GENERAL;
+    return WireCategory(chip_info->wire_types[wire_type].category);
+}
+
 std::vector<std::pair<IdString, std::string>> Arch::getWireAttrs(WireId wire) const { return {}; }
 
 // -----------------------------------------------------------------------
@@ -690,10 +720,10 @@ ArcBounds Arch::getRouteBoundingBox(WireId src, WireId dst) const
     int dst_tile = dst.tile == -1 ? chip_info->nodes[dst.index].tile_wires[0].tile : dst.tile;
     int src_tile = src.tile == -1 ? chip_info->nodes[src.index].tile_wires[0].tile : src.tile;
 
-    int x0 = 0, x1 = 0, y0 = 0, y1 = 0;
-
     int src_x, src_y;
     get_tile_x_y(src_tile, &src_x, &src_y);
+
+    int x0 = src_x, x1 = src_x, y0 = src_y, y1 = src_y;
 
     int dst_x, dst_y;
     get_tile_x_y(dst_tile, &dst_x, &dst_y);
@@ -705,7 +735,6 @@ ArcBounds Arch::getRouteBoundingBox(WireId src, WireId dst) const
         y1 = std::max(y1, y);
     };
 
-    expand(src_x, src_y);
     expand(dst_x, dst_y);
 
     if (source_locs.count(src))
@@ -725,9 +754,11 @@ bool Arch::getBudgetOverride(const NetInfo *net_info, const PortRef &sink, delay
 bool Arch::pack()
 {
     decode_lut_cells();
+    expand_macros();
     merge_constant_nets();
     pack_ports();
     pack_default_conns();
+    pack_cluster();
     return true;
 }
 
@@ -755,6 +786,9 @@ bool Arch::place()
     prepare_for_placement(getCtx());
     getCtx()->check();
 #endif
+
+    place_constraints();
+    place_globals();
 
     std::string placer = str_or_default(settings, id("placer"), defaultPlacer);
     if (placer == "heap") {
@@ -798,6 +832,10 @@ static void prepare_sites_for_routing(Context *ctx)
             ctx->map_cell_pins(cell, cell->cell_mapping, /*bind_constants=*/true);
         }
     }
+
+    // Clear the site routing cache. This is because routing at this stage is done with the extra constraint of blocked
+    // pins to ensure a routeable pin choice.
+    ctx->site_routing_cache.clear();
 
     // Have site router bind site routing (via bindPip and bindWire).
     // This is important so that the pseudo pips are correctly blocked prior
@@ -877,6 +915,8 @@ bool Arch::route()
     // It is not legal in the FPGA interchange to enter a site and not
     // terminate at a BEL pin.
     disallow_site_routing = true;
+
+    route_globals();
 
     bool result;
     if (router == "router1") {
@@ -1479,11 +1519,6 @@ void Arch::remove_pip_pseudo_wires(PipId pip, NetInfo *net)
             // This wire is part of net->wires, make sure it has no pip,
             // but leave it alone.  It will get cleaned up via
             // unbindWire.
-            if (wire_iter->second.pip != PipId() && wire_iter->second.pip != pip) {
-                log_error("Wire %s report source'd from pip %s, which is not %s\n", nameOfWire(wire),
-                          nameOfPip(wire_iter->second.pip), nameOfPip(pip));
-            }
-            NPNR_ASSERT(wire_iter->second.pip == PipId() || wire_iter->second.pip == pip);
         } else {
             // This wire is not in net->wires, update wire_to_net.
 #ifdef DEBUG_BINDING
@@ -1706,8 +1741,12 @@ bool Arch::checkPipAvailForNet(PipId pip, NetInfo *net) const
         }
     }
 
-    // If this pip is a route-though, make sure all of the route-though
-    // wires are unbound.
+    // If this pip is a route-though, make sure all of the route-though are valid.
+    // A route-through is valid if:
+    //   - none of the pseudo-pip wires are bound to a net
+    //   - the pseudo pip wires are bound to the same net and there are no
+    //     lut elements in the tile type: this to prevent the router from choosing
+    //     a pseudo-pip on the same LUT and on a different input pin for the same net.
     const TileTypeInfoPOD &tile_type = loc_info(chip_info, pip);
     const PipInfoPOD &pip_data = tile_type.pip_data[pip.index];
     WireId wire;
@@ -1717,27 +1756,33 @@ bool Arch::checkPipAvailForNet(PipId pip, NetInfo *net) const
         NPNR_ASSERT(src != wire);
         NPNR_ASSERT(dst != wire);
 
-        NetInfo *net = getConflictingWireNet(wire);
-        if (net != nullptr) {
+        NetInfo *other_net = getConflictingWireNet(wire);
+        bool is_null_net = other_net == nullptr;
+        if (!is_null_net) {
+            bool is_same_net = other_net == net;
+            bool tile_has_luts = tile_type.lut_elements.size() > 0;
+            if (!is_same_net || tile_has_luts) {
 #ifdef DEBUG_BINDING
-            if (getCtx()->verbose) {
-                log_info("Pip %s is not available because wire %s is tied to net %s\n", getCtx()->nameOfPip(pip),
-                         getCtx()->nameOfWire(wire), net->name.c_str(getCtx()));
-            }
+                if (getCtx()->verbose)
+                    log_info("Pip %s is not available because wire %s is tied to a different net "
+                             "(other net: %s - orig net: %s) or the pseudo pip may traverses LUTs\n",
+                             getCtx()->nameOfPip(pip), getCtx()->nameOfWire(wire), other_net->name.c_str(getCtx()),
+                             net == nullptr ? "NULL net" : net->name.c_str(getCtx()));
 #endif
-            return false;
+                return false;
+            }
         }
     }
+
+    auto tile_status_iter = tileStatus.find(pip.tile);
 
     if (pip_data.pseudo_cell_wires.size() > 0) {
         // FIXME: This pseudo pip check is incomplete, because constraint
         // failures will not be detected.  However the current FPGA
         // interchange schema does not provide a cell type to place.
-        auto iter = tileStatus.find(pip.tile);
-        if (iter != tileStatus.end()) {
-            if (!iter->second.pseudo_pip_model.checkPipAvail(getCtx(), pip)) {
-                return false;
-            }
+        if (tile_status_iter != tileStatus.end() &&
+            !tile_status_iter->second.pseudo_pip_model.checkPipAvail(getCtx(), pip)) {
+            return false;
         }
     }
 
@@ -1750,18 +1795,16 @@ bool Arch::checkPipAvailForNet(PipId pip, NetInfo *net) const
 
         bool valid_pip = false;
         if (pip.tile == net->driver.cell->bel.tile) {
-            const BelInfoPOD &bel_data = tile_type.bel_data[net->driver.cell->bel.index];
-            if (bel_data.site == pip_data.site) {
-                // Only allow site pips or output site ports.
-                if (dst_wire_data.site == -1) {
-                    // Allow output site port from this site.
-                    NPNR_ASSERT(src_wire_data.site == pip_data.site);
-                    valid_pip = true;
-                }
+            if (tile_status_iter == tileStatus.end()) {
+                // there is no tile status and nothing blocks the validity of this PIP
+                valid_pip = true;
+            } else {
+                const BelInfoPOD &bel_data = tile_type.bel_data[net->driver.cell->bel.index];
+                const SiteRouter &site_router = get_site_status(tile_status_iter->second, bel_data);
 
-                if (dst_wire_data.site == bel_data.site && src_wire_data.site == bel_data.site) {
-                    // This is site pip for the same site as the driver, allow
-                    // this site pip.
+                const auto &pips = site_router.valid_pips;
+                auto result = std::find(pips.begin(), pips.end(), pip);
+                if (result != pips.end()) {
                     valid_pip = true;
                 }
             }
@@ -1906,7 +1949,7 @@ void Arch::unmask_bel_pins()
 
 void Arch::remove_site_routing()
 {
-    HashTables::HashSet<WireId> wires_to_unbind;
+    pool<WireId> wires_to_unbind;
     for (auto &net_pair : nets) {
         for (auto &wire_pair : net_pair.second->wires) {
             WireId wire = wire_pair.first;
@@ -2002,8 +2045,8 @@ void Arch::pack_default_conns()
 
     std::vector<IdString> dead_nets;
 
-    for (auto cell : sorted(ctx->cells)) {
-        CellInfo *ci = cell.second;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
         const DefaultCellConnsPOD *conns = get_default_conns(ci->type);
         if (conns == nullptr)
             continue;

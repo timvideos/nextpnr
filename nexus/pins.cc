@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -24,7 +24,7 @@ NEXTPNR_NAMESPACE_BEGIN
 
 namespace {
 
-static const std::unordered_map<IdString, Arch::CellPinsData> base_cell_pin_data = {
+static const dict<IdString, Arch::CellPinsData> base_cell_pin_data = {
         {id_OXIDE_COMB,
          {
                  {id_WCK, PINSTYLE_DEDI},

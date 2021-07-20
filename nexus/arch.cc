@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -171,6 +171,19 @@ Arch::Arch(ArchArgs args) : args(args)
 
     BaseArch::init_cell_types();
     BaseArch::init_bel_buckets();
+
+    if (device == "LIFCL-17") {
+        for (BelId bel : getBelsByTile(37, 10)) {
+            // These pips currently don't work, due to routing differences between the variants that the DB format needs
+            // some tweaks to accomodate properly
+            if (getBelType(bel) != id_DCC)
+                continue;
+            WireId w = getBelPinWire(bel, id_CLKI);
+            for (auto pip : getPipsUphill(w))
+                disabled_pips.insert(pip);
+        }
+        NPNR_ASSERT(disabled_pips.size() == 4);
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -323,6 +336,17 @@ std::vector<std::pair<IdString, std::string>> Arch::getWireAttrs(WireId wire) co
     ret.emplace_back(id("FLAGS"), stringf("%u", wire_data(wire).flags));
 
     return ret;
+}
+
+IdString Arch::getWireType(WireId wire) const
+{
+    IdString basename(wire_data(wire).name);
+    const std::string &basename_str = basename.str(this);
+    // Interconnect - derive a type
+    if ((basename_str[0] == 'H' || basename_str[0] == 'V') && basename_str[1] == '0')
+        return id(basename_str.substr(0, 4));
+    else
+        return id_GENERAL;
 }
 
 // -----------------------------------------------------------------------
@@ -656,19 +680,19 @@ bool Arch::place()
 
 void Arch::pre_routing()
 {
-    for (auto cell : sorted(cells)) {
-        CellInfo *ci = cell.second;
+    for (auto &cell : cells) {
+        CellInfo *ci = cell.second.get();
         if (ci->type == id_MULT9_CORE || ci->type == id_PREADD9_CORE || ci->type == id_MULT18_CORE ||
             ci->type == id_MULT18X36_CORE || ci->type == id_MULT36_CORE || ci->type == id_REG18_CORE ||
             ci->type == id_ACC54_CORE) {
-            for (auto port : sorted_ref(ci->ports)) {
+            for (auto &port : ci->ports) {
                 WireId wire = getBelPinWire(ci->bel, port.first);
                 if (wire != WireId())
                     dsp_wires.insert(wire);
             }
         }
         if (ci->type == id_LRAM_CORE) {
-            for (auto port : sorted_ref(ci->ports)) {
+            for (auto &port : ci->ports) {
                 WireId wire = getBelPinWire(ci->bel, port.first);
                 if (wire != WireId())
                     lram_wires.insert(wire);

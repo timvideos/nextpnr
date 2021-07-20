@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Claire Xen <claire@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
  *  Copyright (C) 2021  William D. Jones <wjones@wdj-consulting.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -21,6 +21,8 @@
 #ifndef MACHXO2_ARCHDEFS_H
 #define MACHXO2_ARCHDEFS_H
 
+#include "base_clusterinfo.h"
+#include "hashlib.h"
 #include "idstring.h"
 #include "nextpnr_namespaces.h"
 
@@ -58,6 +60,7 @@ struct Location
     bool operator==(const Location &other) const { return x == other.x && y == other.y; }
     bool operator!=(const Location &other) const { return x != other.x || y != other.y; }
     bool operator<(const Location &other) const { return y == other.y ? x < other.x : y < other.y; }
+    unsigned int hash() const { return mkhash(x, y); }
 };
 
 inline Location operator+(const Location &a, const Location &b) { return Location(a.x + b.x, a.y + b.y); }
@@ -73,6 +76,7 @@ struct BelId
     {
         return location == other.location ? index < other.index : location < other.location;
     }
+    unsigned int hash() const { return mkhash(location.hash(), index); }
 };
 
 struct WireId
@@ -86,6 +90,7 @@ struct WireId
     {
         return location == other.location ? index < other.index : location < other.location;
     }
+    unsigned int hash() const { return mkhash(location.hash(), index); }
 };
 
 struct PipId
@@ -99,11 +104,13 @@ struct PipId
     {
         return location == other.location ? index < other.index : location < other.location;
     }
+    unsigned int hash() const { return mkhash(location.hash(), index); }
 };
 
 typedef IdString GroupId;
 typedef IdString DecalId;
 typedef IdString BelBucketId;
+typedef IdString ClusterId;
 
 struct ArchNetInfo
 {
@@ -111,53 +118,10 @@ struct ArchNetInfo
 
 struct NetInfo;
 
-struct ArchCellInfo
+struct ArchCellInfo : BaseClusterInfo
 {
 };
 
 NEXTPNR_NAMESPACE_END
-
-namespace std {
-template <> struct hash<NEXTPNR_NAMESPACE_PREFIX Location>
-{
-    std::size_t operator()(const NEXTPNR_NAMESPACE_PREFIX Location &loc) const noexcept
-    {
-        std::size_t seed = std::hash<int>()(loc.x);
-        seed ^= std::hash<int>()(loc.y) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-        return seed;
-    }
-};
-
-template <> struct hash<NEXTPNR_NAMESPACE_PREFIX BelId>
-{
-    std::size_t operator()(const NEXTPNR_NAMESPACE_PREFIX BelId &bel) const noexcept
-    {
-        std::size_t seed = std::hash<NEXTPNR_NAMESPACE_PREFIX Location>()(bel.location);
-        seed ^= std::hash<int>()(bel.index) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-        return seed;
-    }
-};
-
-template <> struct hash<NEXTPNR_NAMESPACE_PREFIX WireId>
-{
-    std::size_t operator()(const NEXTPNR_NAMESPACE_PREFIX WireId &wire) const noexcept
-    {
-        std::size_t seed = std::hash<NEXTPNR_NAMESPACE_PREFIX Location>()(wire.location);
-        seed ^= std::hash<int>()(wire.index) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-        return seed;
-    }
-};
-
-template <> struct hash<NEXTPNR_NAMESPACE_PREFIX PipId>
-{
-    std::size_t operator()(const NEXTPNR_NAMESPACE_PREFIX PipId &pip) const noexcept
-    {
-        std::size_t seed = std::hash<NEXTPNR_NAMESPACE_PREFIX Location>()(pip.location);
-        seed ^= std::hash<int>()(pip.index) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-        return seed;
-    }
-};
-
-} // namespace std
 
 #endif /* MACHXO2_ARCHDEFS_H */

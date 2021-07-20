@@ -77,13 +77,14 @@ function(add_interchange_test)
 
     # Synthesis
     set(synth_json ${CMAKE_CURRENT_BINARY_DIR}/${name}.json)
+    set(synth_log ${CMAKE_CURRENT_BINARY_DIR}/${name}.json.log)
     add_custom_command(
         OUTPUT ${synth_json}
         COMMAND ${CMAKE_COMMAND} -E env
             SOURCES="${sources}"
             OUT_JSON=${synth_json}
             TECHMAP=${techmap}
-            yosys -c ${tcl}
+            yosys -c ${tcl} -l ${synth_log}
         DEPENDS ${sources} ${techmap} ${tcl}
     )
 
@@ -134,6 +135,7 @@ function(add_interchange_test)
     get_property(chipdb_bin_loc TARGET device-${device} PROPERTY CHIPDB_BIN_LOC)
 
     set(phys ${CMAKE_CURRENT_BINARY_DIR}/${name}.phys)
+    set(phys_log ${CMAKE_CURRENT_BINARY_DIR}/${name}.phys.log)
     add_custom_command(
         OUTPUT ${phys}
         COMMAND
@@ -143,6 +145,7 @@ function(add_interchange_test)
                 --netlist ${netlist}
                 --phys ${phys}
                 --package ${package}
+                --log ${phys_log}
         DEPENDS
             nextpnr-fpga_interchange
             ${netlist}
@@ -151,6 +154,7 @@ function(add_interchange_test)
             ${chipdb_bin_loc}
     )
 
+    set(phys_verbose_log ${CMAKE_CURRENT_BINARY_DIR}/${name}.phys.verbose.log)
     add_custom_target(
         test-${family}-${name}-phys-verbose
         COMMAND
@@ -161,6 +165,7 @@ function(add_interchange_test)
                 --phys ${phys}
                 --package ${package}
                 --verbose
+                --log ${phys_verbose_log}
         DEPENDS
             ${netlist}
             ${xdc}
@@ -321,6 +326,7 @@ function(add_interchange_group_test)
     #    sources <sources list>
     #    [top <top name>]
     #    [techmap <techmap file>]
+    #    [skip_dcp]
     # )
     #
     # Generates targets to run desired tests over multiple devices.
@@ -340,7 +346,7 @@ function(add_interchange_group_test)
     # Note: it is assumed that there exists an XDC file for each board, with the following naming
     #       convention: <board>.xdc
 
-    set(options output_fasm)
+    set(options output_fasm skip_dcp)
     set(oneValueArgs name family tcl top techmap)
     set(multiValueArgs sources board_list)
 
@@ -359,12 +365,17 @@ function(add_interchange_group_test)
     set(techmap ${add_interchange_group_test_techmap})
     set(sources ${add_interchange_group_test_sources})
     set(output_fasm ${add_interchange_group_test_output_fasm})
+    set(skip_dcp ${add_interchange_group_test_skip_dcp})
 
     set(output_fasm_arg "")
     if(output_fasm)
         set(output_fasm_arg "output_fasm")
     endif()
 
+    set(skip_dcp_arg "")
+    if(skip_dcp)
+        set(skip_dcp_arg "skip_dcp")
+    endif()
 
     if (NOT DEFINED top)
         # Setting default top value
@@ -388,6 +399,7 @@ function(add_interchange_group_test)
             top ${top}
             techmap ${techmap}
             ${output_fasm_arg}
+            ${skip_dcp_arg}
         )
     endforeach()
 endfunction()
