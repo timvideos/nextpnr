@@ -5,13 +5,16 @@ nextpnr aims to be a vendor neutral, timing driven, FOSS FPGA place and route
 tool.
 
 Currently nextpnr supports:
- * Lattice iCE40 devices supported by [Project IceStorm](http://www.clifford.at/icestorm/)
+ * Lattice iCE40 devices supported by [Project IceStorm](https://github.com/YosysHQ/icestorm)
  * Lattice ECP5 devices supported by [Project Trellis](https://github.com/YosysHQ/prjtrellis)
  * Lattice Nexus devices supported by [Project Oxide](https://github.com/gatecat/prjoxide)
- * Gowin LittleBee devices supported by [Project Apicula](https://github.com/YosysHQ/apicula)
+ * Gowin LittleBee and Aurora V devices supported by [Project Apicula](https://github.com/YosysHQ/apicula)
+ * NanoXplore NG-Ultra devices supported by [Project Beyond](https://github.com/YosysHQ-GmbH/prjbeyond-db)
+ * Cologne Chip GateMate devices supported by [Project Peppercorn](https://github.com/YosysHQ/prjpeppercorn)
+ * *(experimental)* Cyclone V devices supported by [Mistral](https://github.com/Ravenslofty/mistral)
+ * *(experimental)* Lattice MachXO2 devices supported by [Project Trellis](https://github.com/YosysHQ/prjtrellis)
+ * *(experimental)* Xilinx 7-series devices supported by [Project X-Ray](https://github.com/F4PGA/prjxray)
  * *(experimental)* a "generic" back-end for user-defined architectures
-
-There is some work in progress towards [support for Xilinx devices](https://github.com/daveshah1/nextpnr-xilinx/) but it is not upstream and not intended for end users at the present time. We hope to see more FPGA families supported in the future. We would love your help in developing this awesome new project!
 
 A brief (academic) paper describing the Yosys+nextpnr flow can be found
 on [arXiv](https://arxiv.org/abs/1903.10407).
@@ -32,13 +35,14 @@ Prerequisites
 The following packages need to be installed for building nextpnr, independent
 of the selected architecture:
 
-- CMake 3.3 or later
-- Modern C++14 compiler (`clang-format` required for development)
+- CMake 3.25 or later
+- Modern C++17 compiler (`clang-format` required for development)
 - Python 3.5 or later, including development libraries (`python3-dev` for Ubuntu)
+  - Python 3.9 or later is required for `nextpnr-himbaechel`
   - on Windows make sure to install same version as supported by [vcpkg](https://github.com/Microsoft/vcpkg/blob/master/ports/python3/CONTROL)
 - Boost libraries (`libboost-dev libboost-filesystem-dev libboost-thread-dev libboost-program-options-dev libboost-iostreams-dev libboost-dev` or `libboost-all-dev` for Ubuntu)
-- Eigen3 (`libeigen3-dev` for Ubuntu) is required to build the analytic placer
-- Latest git Yosys is required to synthesise the demo design
+- Eigen3 (`libeigen3-dev` for Ubuntu)
+- Yosys is required to synthesise the demo design
 - For building on Windows with MSVC, usage of vcpkg is advised for dependency installation.
   - For 32 bit builds: `vcpkg install boost-filesystem boost-program-options boost-thread eigen3`
   - For 64 bit builds: `vcpkg install boost-filesystem:x64-windows boost-program-options:x64-windows boost-thread:x64-windows eigen3:x64-windows`
@@ -50,12 +54,19 @@ of the selected architecture:
 Getting started
 ---------------
 
-### nextpnr-ice40
-
-For iCE40 support, install [Project IceStorm](http://www.clifford.at/icestorm/) to `/usr/local` or another location, which should be passed as `-DICESTORM_INSTALL_PREFIX=/usr` to CMake. Then build and install `nextpnr-ice40` using the following commands:
+First of all, run:
 
 ```
-cmake . -DARCH=ice40
+git submodule update --init --recursive
+```
+
+### nextpnr-ice40
+
+For iCE40 support, install [Project IceStorm](https://github.com/YosysHQ/icestorm) to `/usr/local` or another location, which should be passed as `-DICESTORM_INSTALL_PREFIX=/usr` to CMake. Then build and install `nextpnr-ice40` using the following commands:
+
+```
+mkdir -p build && cd build
+cmake .. -DARCH=ice40
 make -j$(nproc)
 sudo make install
 ```
@@ -63,8 +74,8 @@ sudo make install
 On Windows, you may specify paths explicitly:
 
 ```
-cmake . -DARCH=ice40 -DICESTORM_INSTALL_PREFIX=C:/ProgramData/icestorm -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows -G "Visual Studio 15 2017 Win64" -DPYTHON_EXECUTABLE=C:/Python364/python.exe -DPYTHON_LIBRARY=C:/vcpkg/packages/python3_x64-windows/lib/python36.lib -DPYTHON_INCLUDE_DIR=C:/vcpkg/packages/python3_x64-windows/include/python3.6 .
-cmake --build . --config Release
+cmake . -B build -DARCH=ice40 -DICESTORM_INSTALL_PREFIX=C:/ProgramData/icestorm -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows -G "Visual Studio 15 2017 Win64" -DPython3_EXECUTABLE=C:/Python364/python.exe -DPython3_LIBRARY=C:/vcpkg/packages/python3_x64-windows/lib/python36.lib -DPython3_INCLUDE_DIR=C:/vcpkg/packages/python3_x64-windows/include/python3.6
+cmake --build build --config Release
 ```
 
 To build a static release, change the target triplet from `x64-windows` to `x64-windows-static` and add `-DBUILD_STATIC=ON`.
@@ -94,7 +105,8 @@ such as pack, place, route, and write output files.)
 For ECP5 support, install [Project Trellis](https://github.com/YosysHQ/prjtrellis) to `/usr/local` or another location, which should be passed as `-DTRELLIS_INSTALL_PREFIX=/usr/local` to CMake. Then build and install `nextpnr-ecp5` using the following commands:
 
 ```
-cmake . -DARCH=ecp5 -DTRELLIS_INSTALL_PREFIX=/usr/local
+mkdir -p build && cd build
+cmake .. -DARCH=ecp5 -DTRELLIS_INSTALL_PREFIX=/usr/local
 make -j$(nproc)
 sudo make install
 ```
@@ -106,44 +118,94 @@ sudo make install
 For Nexus support, install [Project Oxide](https://github.com/gatecat/prjoxide) to `$HOME/.cargo` or another location, which should be passed as `-DOXIDE_INSTALL_PREFIX=$HOME/.cargo` to CMake. Then build and install `nextpnr-nexus` using the following commands:
 
 ```
-cmake . -DARCH=nexus -DOXIDE_INSTALL_PREFIX=$HOME/.cargo
+mkdir -p build && cd build
+cmake .. -DARCH=nexus -DOXIDE_INSTALL_PREFIX=$HOME/.cargo
 make -j$(nproc)
 sudo make install
 ```
 
  - Examples of the Nexus flow for a range of boards can be found in the [Project Oxide Examples](https://github.com/gatecat/prjoxide/tree/master/examples).
 
-Nexus support is currently experimental, and has only been tested with engineering sample silicon.
+### nextpnr-mistral
 
-### nextpnr-gowin
-
-For Gowin support, install [Project Apicula](https://github.com/YosysHQ/apicula). If a virtualenv is used, the python paths need to be provided as follows:
+For Cyclone V support, clone [Mistral](https://github.com/Ravenslofty/mistral/tree/nextpnr-latest) to `$HOME/mistral` or another location and pass this path as `-DMISTRAL_ROOT=$HOME/mistral` to CMake. Then build and install `nextpnr-mistral` using the following commands:
 
 ```
-cmake . -DARCH=gowin -DPYTHON_EXECUTABLE=path -DGOWIN_BBA_EXECUTABLE=path
+mkdir -p build && cd build
+cmake .. -DARCH=mistral -DMISTRAL_ROOT=$HOME/mistral
 make -j$(nproc)
 sudo make install
 ```
 
- - Examples of the Gowin flow for a range of boards can be found in the [Project Apicula Examples](https://github.com/YosysHQ/apicula/tree/master/examples).
+Cyclone V support is currently experimental and has limited testing. The backend is undergoing active API refactoring, and its structure, build requirements, and integration points may change between versions.
 
 ### nextpnr-generic
 
 The generic target allows running placement and routing for arbitrary custom architectures.
 
 ```
-cmake . -DARCH=generic
+mkdir -p build && cd build
+cmake .. -DARCH=generic
 make -j$(nproc)
 sudo make install
 ```
 
 An example of how to use the generic flow is in [generic/examples](generic/examples). See also the [Generic Architecture docs](docs/generic.md).
 
+### nextpnr-himbaechel
+
+The himbaechel target allows running placement and routing for larger architectures that share a common structure.
+
+#### gowin
+
+For Gowin support, install [Project Apicula](https://github.com/YosysHQ/apicula)
+
+```
+mkdir -p build && cd build
+cmake .. -DARCH="himbaechel" -DHIMBAECHEL_UARCH="gowin"
+make -j$(nproc)
+sudo make install
+```
+
+ - Examples of the Gowin flow for a range of boards can be found in the [Project Apicula Examples](https://github.com/YosysHQ/apicula/tree/master/examples).
+
+#### ng-ultra
+
+For NanoXplore NG-Ultra support, clone [Project Beyond DB](https://github.com/yosyshq-GmbH/prjbeyond-db) repo
+
+```
+mkdir -p build && cd build
+cmake .. -DARCH="himbaechel" -DHIMBAECHEL_UARCH="ng-ultra" -DHIMBAECHEL_PRJBEYOND_DB=/path/to/prjbeyond-db -DHIMBAECHEL_NGULTRA_DEVICES=ng-ultra
+make -j$(nproc)
+sudo make install
+```
+
+*Please note that binary bitstream creation requires Impulse tool from NanoXplore.*
+
+#### gatemate
+
+For Cologne Chip GateMate support, clone [Project Peppercorn](https://github.com/YosysHQ/prjpeppercorn)
+
+```
+mkdir -p build && cd build
+cmake .. -DARCH="himbaechel" -DHIMBAECHEL_UARCH="gatemate" -DHIMBAECHEL_PEPPERCORN_PATH=/path/to/prjpeppercorn
+make -j$(nproc)
+sudo make install
+```
+
 ### GUI
 
-The nextpnr GUI is not built by default, to reduce the number of dependencies for a standard headless build. To enable it, add `-DBUILD_GUI=ON` to the CMake command line and ensure that Qt5 and OpenGL are available:
+The nextpnr GUI is not built by default, to reduce the number of dependencies for a standard headless build. To enable it, add `-DBUILD_GUI=ON` to the CMake command line and ensure that Qt5/Qt6 and OpenGL are available:
 
- - On Ubuntu, install `qt5-default`
+For Qt6:
+ - On Ubuntu 22.04 LTS or later, install `qt6-base-dev`
+ - For MSVC vcpkg, install `qt-base` (32-bit) or `qt-base:x64-windows` (64-bit)
+ - For Homebrew, install `qt6` and add qt6 in path: `echo 'export PATH="/usr/local/opt/qt/bin:$PATH"' >> ~/.bash_profile`
+` - this change is effective in next terminal session, so please re-open terminal window before building
+
+For Qt5:
+ - On Ubuntu 22.04 LTS, install `qtbase5-dev qtchooser qt5-qmake qtbase5-dev-tools`
+ - On other Ubuntu versions, install `qt5-default`
  - For MSVC vcpkg, install `qt5-base` (32-bit) or `qt5-base:x64-windows` (64-bit)
  - For Homebrew, install `qt5` and add qt5 in path: `echo 'export PATH="/usr/local/opt/qt/bin:$PATH"' >> ~/.bash_profile`
 ` - this change is effective in next terminal session, so please re-open terminal window before building
@@ -153,25 +215,26 @@ The nextpnr GUI is not built by default, to reduce the number of dependencies fo
 To build nextpnr for multiple architectures at once, a semicolon-separated list can be used with `-DARCH`.
 
 ```
-cmake . -DARCH="ice40;ecp5"
+mkdir -p build && cd build
+cmake .. -DARCH="ice40;ecp5"
 make -j$(nproc)
 sudo make install
 ```
 
 To build every available stable architecture, use `-DARCH=all`. To include experimental arches (currently nexus), use `-DARCH=all+alpha`.
 
-Pre-generating chip databases
------------------------------
+### Per-microarchitecture Himbächel
 
-It is possible to pre-generate chip databases (`.bba` files). This can come in handy when building on time-constrained cloud instances, or in situations where Python is unable to use modules. To do this, build the architecture as a standalone project, which will produce the chip database alone. For example, for iCE40:
+To build a single nextpnr-himbachel executable for each of the supported microarchitectures, use `-DHIMBAECHEL_SPLIT`.
 
 ```
-cd ice40
-cmake .
-make
+mkdir -p build && cd build
+cmake .. -DARCH="himbaechel" -DHIMBAECHEL_UARCH="gowin;ng-ultra"
+make -j$(nproc)
+sudo make install
 ```
 
-This will create a `chipdb` directory with `.bba` files. Provide the path to this directory when building nextpnr by using `-D<arch>_CHIPDB=/path/to/chipdb`.
+In such a build, instead of a single `nextpnr-himbaechel` binary, two binaries `nextpnr-himbaechel-gowin` and `nextpnr-himbaechel-ng-ultra` are built. Although they are installed together, each microarchitecture is completely independent of the other, and only needs its corresponding `.../share/himbaechel/<microarchitecture>/` chip database directory to run. Split build reduces the size of individual distributed artifacts (although the total size increases), and allows co-installation of artifacts of different versions.
 
 Cross-compilation
 -----------------
@@ -192,14 +255,16 @@ Additional notes for building nextpnr
 The following runs a debug build of the iCE40 architecture without GUI, without Python support, without the HeAP analytic placer and only HX1K support:
 
 ```
-cmake . -DARCH=ice40 -DCMAKE_BUILD_TYPE=Debug -DBUILD_PYTHON=OFF  -DBUILD_HEAP=OFF -DICE40_HX1K_ONLY=1
+mkdir -p build && cd build
+cmake .. -DARCH=ice40 -DCMAKE_BUILD_TYPE=Debug -DBUILD_PYTHON=OFF -DICE40_DEVICES=1k
 make -j$(nproc)
 ```
 
 To make static build release for iCE40 architecture use the following:
 
 ```
-cmake . -DARCH=ice40 -DBUILD_PYTHON=OFF -DSTATIC_BUILD=ON
+mkdir -p build && cd build
+cmake .. -DARCH=ice40 -DBUILD_PYTHON=OFF -DSTATIC_BUILD=ON
 make -j$(nproc)
 ```
 
@@ -243,15 +308,15 @@ Links and references
 
 ### Synthesis, simulation, and logic optimization
 
-- [Yosys](http://www.clifford.at/yosys/)
+- [Yosys](https://yosyshq.net/yosys/)
 - [Icarus Verilog](http://iverilog.icarus.com/)
 - [ABC](https://people.eecs.berkeley.edu/~alanmi/abc/)
 
 ### FPGA bitstream documentation (and tools) projects
 
-- [Project IceStorm (Lattice iCE40)](http://www.clifford.at/icestorm/)
+- [Project IceStorm (Lattice iCE40)](https://github.com/YosysHQ/icestorm)
 - [Project Trellis (Lattice ECP5)](https://yosyshq.github.io/prjtrellis-db/)
-- [Project X-Ray (Xilinx 7-Series)](https://symbiflow.github.io/prjxray-db/)
+- [Project X-Ray (Xilinx 7-Series)](https://github.com/F4PGA/prjxray)
 - [Project Chibi (Intel MAX-V)](https://github.com/rqou/project-chibi)
 
 ### Other FOSS FPGA place and route projects

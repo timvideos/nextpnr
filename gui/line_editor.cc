@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
  *  Copyright (C) 2018  Alex Tsui
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -118,7 +118,7 @@ void LineEditor::clearHistory()
 void LineEditor::autocomplete()
 {
     QString line = text();
-    const std::list<std::string> &suggestions = pyinterpreter_suggest(line.toStdString());
+    const std::list<std::string> suggestions = pyinterpreter_suggest(line.toStdString());
     if (suggestions.size() == 1) {
         line = suggestions.back().c_str();
     } else {

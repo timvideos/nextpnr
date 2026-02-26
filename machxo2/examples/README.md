@@ -20,6 +20,7 @@ This directory contains a simple example of running `nextpnr-machxo2`:
 * `demo.sh` creates bitstreams for [TinyFPGA Ax](https://tinyfpga.com/a-series-guide.html)
   and writes the resulting bitstream to MachXO2's internal flash using
   [`tinyproga`](https://github.com/tinyfpga/TinyFPGA-A-Programmer).
+  `demo-vhdl.sh` does the same, except using the [GHDL Yosys Plugin](https://github.com/ghdl/ghdl-yosys-plugin).
 
 As `nextpnr-machxo2` is developed the contents `simple.sh`, `simtest.sh`,
 `mitertest.sh`, and `demo.sh` are subject to change.
@@ -72,7 +73,7 @@ few reasons:
   2. To keep the `gold`/`gate` generation simpler, examples are currently
      assumed to _not_ instantiate MachXO2 simulation primitives directly
     (`FACADE_IO`, `FACADE_FF`, etc).
-  3. `synth_machxo2` runs `deminout` on `inouts` when generating the `gate`
+  3. `synth_lattice` runs `deminout` on `inouts` when generating the `gate`
      module. This is not handled yet when generating the `gold` module.
 
 ## Verilog Examples
@@ -100,9 +101,9 @@ few reasons:
   Defaults to the `nextpnr-machxo2` binary at the root of the `nextpnr` source
   tree. This should be set, for instance, if doing an out-of-tree build of
   `nextpnr-machxo2`.
-* `CELLS_SIM`- Set to the location of `machxo2/cells_sim.v` simulation models.
+* `CELLS_SIM`- Set to the location of `lattice/cells_sim_xo2.v` simulation models.
   Defaults to whatever `yosys-config` associated with the above `YOSYS` binary
-  returns. You may want to set this to `/path/to/yosys/src/share/machxo2/cells_sim.v`
+  returns. You may want to set this to `/path/to/yosys/src/share/lattice/cells_sim_xo2.v`
   if doing development; `yosys-config` cannot find these "before-installation"
   simulation models.
 * `TRELLIS_DB`- Set to the location of the Project Trellis database to use.

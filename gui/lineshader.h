@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -170,6 +170,7 @@ class LineShader
 
   public:
     LineShader(QObject *parent) : parent_(parent), program_(nullptr) {}
+    ~LineShader() { ((QOpenGLWidget *)parent_)->makeCurrent(); }
 
     static constexpr const char *vertexShaderSource_ =
             "#version 150\n"

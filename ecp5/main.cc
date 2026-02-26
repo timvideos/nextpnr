@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -17,8 +17,6 @@
  *
  */
 
-#ifdef MAIN_EXECUTABLE
-
 #include <fstream>
 #include "bitstream.h"
 #include "command.h"
@@ -33,9 +31,9 @@ class ECP5CommandHandler : public CommandHandler
 {
   public:
     ECP5CommandHandler(int argc, char **argv);
-    virtual ~ECP5CommandHandler(){};
-    std::unique_ptr<Context> createContext(std::unordered_map<std::string, Property> &values) override;
-    void setupArchContext(Context *ctx) override{};
+    virtual ~ECP5CommandHandler() {};
+    std::unique_ptr<Context> createContext(dict<std::string, Property> &values) override;
+    void setupArchContext(Context *ctx) override {};
     void customAfterLoad(Context *ctx) override;
     void validate() override;
     void customBitstream(Context *ctx) override;
@@ -82,9 +80,11 @@ po::options_description ECP5CommandHandler::getArchOptions()
     specific.add_options()("lpf", po::value<std::vector<std::string>>(), "LPF pin constraint file(s)");
     specific.add_options()("lpf-allow-unconstrained", "don't require LPF file(s) to constrain all IO");
 
+    specific.add_options()("no-promote-globals", "disable all global promotion");
     specific.add_options()(
             "out-of-context",
             "disable IO buffer insertion and global promotion/routing, for building pre-routed blocks (experimental)");
+    specific.add_options()("disable-router-lutperm", "don't allow the router to permute LUT inputs");
 
     return specific;
 }
@@ -110,11 +110,10 @@ void ECP5CommandHandler::customBitstream(Context *ctx)
         log_error("bitstream generation is not available in out-of-context mode (use --write to create a post-PnR JSON "
                   "design)\n");
 
-    std::string textcfg;
-    if (vm.count("textcfg"))
-        textcfg = vm["textcfg"].as<std::string>();
-
-    write_bitstream(ctx, basecfg, textcfg);
+    if (vm.count("textcfg")) {
+        std::string textcfg = vm["textcfg"].as<std::string>();
+        write_bitstream(ctx, basecfg, textcfg);
+    }
 }
 
 static std::string speedString(ArchArgs::SpeedGrade speed)
@@ -132,7 +131,7 @@ static std::string speedString(ArchArgs::SpeedGrade speed)
     return "";
 }
 
-std::unique_ptr<Context> ECP5CommandHandler::createContext(std::unordered_map<std::string, Property> &values)
+std::unique_ptr<Context> ECP5CommandHandler::createContext(dict<std::string, Property> &values)
 {
     ArchArgs chipArgs;
     chipArgs.type = ArchArgs::NONE;
@@ -253,8 +252,12 @@ std::unique_ptr<Context> ECP5CommandHandler::createContext(std::unordered_map<st
         ctx->settings[ctx->id(val.first)] = val.second;
     ctx->settings[ctx->id("arch.package")] = ctx->archArgs().package;
     ctx->settings[ctx->id("arch.speed")] = speedString(ctx->archArgs().speed);
+    if (vm.count("no-promote-globals"))
+        ctx->settings[ctx->id("arch.no-promote-globals")] = 1;
     if (vm.count("out-of-context"))
         ctx->settings[ctx->id("arch.ooc")] = 1;
+    if (vm.count("disable-router-lutperm"))
+        ctx->settings[ctx->id("arch.disable_router_lutperm")] = 1;
     return ctx;
 }
 
@@ -270,11 +273,11 @@ void ECP5CommandHandler::customAfterLoad(Context *ctx)
                 log_error("failed to parse LPF file '%s'\n", filename.c_str());
         }
 
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (ci->type == ctx->id("$nextpnr_ibuf") || ci->type == ctx->id("$nextpnr_obuf") ||
                 ci->type == ctx->id("$nextpnr_iobuf")) {
-                if (!ci->attrs.count(ctx->id("LOC"))) {
+                if (!ci->attrs.count(id_LOC)) {
                     if (vm.count("lpf-allow-unconstrained"))
                         log_warning("IO '%s' is unconstrained in LPF and will be automatically placed\n",
                                     cell.first.c_str(ctx));
@@ -293,5 +296,3 @@ int main(int argc, char *argv[])
     ECP5CommandHandler handler(argc, argv);
     return handler.exec();
 }
-
-#endif

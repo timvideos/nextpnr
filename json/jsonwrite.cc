@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -45,7 +45,7 @@ std::string get_string(std::string str)
 
 std::string get_name(IdString name, Context *ctx) { return get_string(name.c_str(ctx)); }
 
-void write_parameters(std::ostream &f, Context *ctx, const std::unordered_map<IdString, Property> &parameters,
+void write_parameters(std::ostream &f, Context *ctx, const dict<IdString, Property> &parameters,
                       bool for_module = false)
 {
     bool first = true;
@@ -60,21 +60,24 @@ void write_parameters(std::ostream &f, Context *ctx, const std::unordered_map<Id
 struct PortGroup
 {
     std::string name;
+    std::vector<std::pair<int, int>> grouped_bits; // (index, bit)
     std::vector<int> bits;
     PortType dir;
+    int offset = 0;
 };
 
-std::vector<PortGroup> group_ports(Context *ctx, const std::unordered_map<IdString, PortInfo> &ports,
-                                   bool is_cell = false)
+std::vector<PortGroup> group_ports(Context *ctx, const dict<IdString, PortInfo> &ports, bool is_cell = false)
 {
     std::vector<PortGroup> groups;
-    std::unordered_map<std::string, size_t> base_to_group;
+    dict<std::string, size_t> base_to_group;
     for (auto &pair : ports) {
         std::string name = pair.second.name.str(ctx);
         if ((name.back() != ']') || (name.find('[') == std::string::npos)) {
-            groups.push_back({name,
-                              {is_cell ? (pair.second.net ? pair.second.net->name.index : -1) : pair.first.index},
-                              pair.second.type});
+            groups.push_back(
+                    {name,
+                     {{0, (is_cell ? (pair.second.net ? pair.second.net->name.index : -1) : pair.first.index)}},
+                     {},
+                     pair.second.type});
         } else {
             int off1 = int(name.find_last_of('['));
             std::string basename = name.substr(0, off1);
@@ -82,14 +85,24 @@ std::vector<PortGroup> group_ports(Context *ctx, const std::unordered_map<IdStri
 
             if (!base_to_group.count(basename)) {
                 base_to_group[basename] = groups.size();
-                groups.push_back({basename, std::vector<int>(index + 1, -1), pair.second.type});
+                groups.push_back({basename, {}, {}, pair.second.type});
             }
 
             auto &grp = groups.at(base_to_group[basename]);
-            if (int(grp.bits.size()) <= index)
-                grp.bits.resize(index + 1, -1);
-            NPNR_ASSERT(grp.bits.at(index) == -1);
-            grp.bits.at(index) = pair.second.net ? pair.second.net->name.index : (is_cell ? -1 : pair.first.index);
+            grp.grouped_bits.emplace_back(index, pair.second.net ? pair.second.net->name.index
+                                                                 : (is_cell ? -1 : pair.first.index));
+        }
+    }
+    for (auto &group : groups) {
+        NPNR_ASSERT(!group.grouped_bits.empty());
+        // find offset
+        group.offset = std::min_element(group.grouped_bits.begin(), group.grouped_bits.end())->first;
+        for (auto bit : group.grouped_bits) {
+            int vec_idx = bit.first - group.offset;
+            if (vec_idx >= int(group.bits.size()))
+                group.bits.resize(vec_idx + 1, -1);
+            NPNR_ASSERT(group.bits.at(vec_idx) == -1);
+            group.bits.at(vec_idx) = bit.second;
         }
     }
     return groups;
@@ -138,6 +151,9 @@ void write_module(std::ostream &f, Context *ctx)
         f << stringf("          \"direction\": \"%s\",\n", port.dir == PORT_IN      ? "input"
                                                            : port.dir == PORT_INOUT ? "inout"
                                                                                     : "output");
+        if (port.offset != 0) {
+            f << stringf("          \"offset\": %d,\n", port.offset);
+        }
         f << stringf("          \"bits\": %s\n", format_port_bits(port, dummy_idx).c_str());
         f << stringf("        }");
         first = false;

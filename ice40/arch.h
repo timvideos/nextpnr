@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -400,10 +400,10 @@ struct Arch : BaseArch<ArchRanges>
     const ChipInfoPOD *chip_info;
     const PackageInfoPOD *package_info;
 
-    mutable std::unordered_map<IdStringList, int> bel_by_name;
-    mutable std::unordered_map<IdStringList, int> wire_by_name;
-    mutable std::unordered_map<IdStringList, int> pip_by_name;
-    mutable std::unordered_map<Loc, int> bel_by_loc;
+    mutable dict<IdStringList, int> bel_by_name;
+    mutable dict<IdStringList, int> wire_by_name;
+    mutable dict<IdStringList, int> pip_by_name;
+    mutable dict<Loc, int> bel_by_loc;
 
     std::vector<bool> bel_carry;
     std::vector<CellInfo *> bel_to_cell;
@@ -414,7 +414,7 @@ struct Arch : BaseArch<ArchRanges>
     // fast access to  X and Y IdStrings for building object names
     std::vector<IdString> x_ids, y_ids;
     // inverse of the above for name->object mapping
-    std::unordered_map<IdString, int> id_to_x, id_to_y;
+    dict<IdString, int> id_to_x, id_to_y;
 
     ArchArgs args;
     Arch(ArchArgs args);
@@ -680,6 +680,16 @@ struct Arch : BaseArch<ArchRanges>
         return switches_locked[pi.switch_index] == WireId();
     }
 
+    bool checkPipAvailForNet(PipId pip, const NetInfo *net) const override
+    {
+        if (ice40_pip_hard_unavail(pip))
+            return false;
+
+        auto &pi = chip_info->pip_data[pip.index];
+        auto swl = switches_locked[pi.switch_index];
+        return swl == WireId() || (swl == getPipDstWire(pip) && wire_to_net[swl.index] == net);
+    }
+
     NetInfo *getBoundPipNet(PipId pip) const override
     {
         NPNR_ASSERT(pip != PipId());
@@ -784,15 +794,14 @@ struct Arch : BaseArch<ArchRanges>
     // -------------------------------------------------
 
     delay_t estimateDelay(WireId src, WireId dst) const override;
-    delay_t predictDelay(const NetInfo *net_info, const PortRef &sink) const override;
+    delay_t predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const override;
     delay_t getDelayEpsilon() const override { return 20; }
     delay_t getRipupDelayPenalty() const override { return 200; }
     float getDelayNS(delay_t v) const override { return v * 0.001; }
     delay_t getDelayFromNS(float ns) const override { return delay_t(ns * 1000); }
     uint32_t getDelayChecksum(delay_t v) const override { return v; }
-    bool getBudgetOverride(const NetInfo *net_info, const PortRef &sink, delay_t &budget) const override;
 
-    ArcBounds getRouteBoundingBox(WireId src, WireId dst) const override;
+    BoundingBox getRouteBoundingBox(WireId src, WireId dst) const override;
 
     // -------------------------------------------------
 
@@ -830,7 +839,7 @@ struct Arch : BaseArch<ArchRanges>
     // implemented in arch_place.cc)
 
     // Return true whether all Bels at a given location are valid
-    bool isBelLocationValid(BelId bel) const override;
+    bool isBelLocationValid(BelId bel, bool explain_invalid = false) const override;
 
     // Helper function for above
     bool logic_cells_compatible(const CellInfo **it, const size_t size) const;

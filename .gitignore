@@ -1,12 +1,12 @@
-/generated/
 /objs/
 /nextpnr-generic*
 /nextpnr-ice40*
 /nextpnr-ecp5*
 /nextpnr-nexus*
 /nextpnr-fpga_interchange*
-/nextpnr-gowin*
 /nextpnr-machxo2*
+/nextpnr-himbaechel*
+.cache
 cmake-build-*/
 Makefile
 cmake_install.cmake
@@ -27,6 +27,7 @@ a.out
 *.il
 /generic/examples/blinky.png
 build/
+share/
 *.asc
 *.bin
 /Testing/*

@@ -196,12 +196,15 @@ class BinaryBlobAssembler:
         print("str |%s| %s" % (s, comment))
 
     def u8(self, v, comment):
+        assert -128 <= int(v) <= 127
         if comment is None:
             print("u8 %d" % (v,))
         else:
             print("u8 %d %s" % (v, comment))
 
     def u16(self, v, comment):
+        # is actually used as signed 16 bit
+        assert -32768 <= int(v) <= 32767
         if comment is None:
             print("u16 %d" % (v,))
         else:
@@ -239,11 +242,15 @@ def get_bel_index(ddrg, loc, name):
 packages = {}
 pindata = []
 
-def process_pio_db(ddrg, device):
-    piofile = path.join(database.get_db_root(), "ECP5", dev_names[device], "iodb.json")
+def process_pio_db(ddrg, device, package_filter=None):
+    piofile = path.join(database.get_db_root(), "ECP5", device, "iodb.json")
     with open(piofile, 'r') as f:
         piodb = json.load(f)
         for pkgname, pkgdata in sorted(piodb["packages"].items()):
+            if package_filter is not None and pkgname not in package_filter:
+                # we need to get the TQ144 package only out of the non-SERDES device
+                # everything else comes from the SERDES device
+                continue
             pins = []
             for name, pinloc in sorted(pkgdata.items()):
                 x = pinloc["col"]
@@ -254,30 +261,31 @@ def process_pio_db(ddrg, device):
                 if bel_idx is not None:
                     pins.append((name, loc, bel_idx))
             packages[pkgname] = pins
-        for metaitem in piodb["pio_metadata"]:
-            x = metaitem["col"]
-            y = metaitem["row"]
-            loc = pytrellis.Location(x, y)
-            pio = "PIO" + metaitem["pio"]
-            bank = metaitem["bank"]
-            if "function" in metaitem:
-                pinfunc = metaitem["function"]
-            else:
-                pinfunc = None
-            dqs = -1
-            if "dqs" in metaitem:
-                tdqs = metaitem["dqs"]
-                if tdqs[0] == "L":
-                    dqs = 0
-                elif tdqs[0] == "R":
-                    dqs = 2048
-                suffix_size = 0
-                while tdqs[-(suffix_size+1)].isdigit():
-                    suffix_size += 1
-                dqs |= int(tdqs[-suffix_size:])
-            bel_idx = get_bel_index(ddrg, loc, pio)
-            if bel_idx is not None:
-                pindata.append((loc, bel_idx, bank, pinfunc, dqs))
+        if package_filter is None:
+            for metaitem in piodb["pio_metadata"]:
+                x = metaitem["col"]
+                y = metaitem["row"]
+                loc = pytrellis.Location(x, y)
+                pio = "PIO" + metaitem["pio"]
+                bank = metaitem["bank"]
+                if "function" in metaitem:
+                    pinfunc = metaitem["function"]
+                else:
+                    pinfunc = None
+                dqs = -1
+                if "dqs" in metaitem:
+                    tdqs = metaitem["dqs"]
+                    if tdqs[0] == "L":
+                        dqs = 0
+                    elif tdqs[0] == "R":
+                        dqs = 2048
+                    suffix_size = 0
+                    while tdqs[-(suffix_size+1)].isdigit():
+                        suffix_size += 1
+                    dqs |= int(tdqs[-suffix_size:])
+                bel_idx = get_bel_index(ddrg, loc, pio)
+                if bel_idx is not None:
+                    pindata.append((loc, bel_idx, bank, pinfunc, dqs))
 
 global_data = {}
 quadrants = ["UL", "UR", "LL", "LR"]
@@ -308,6 +316,64 @@ timing_port_xform = {
 }
 
 
+delay_db = {}
+# Convert from Lattice-style grouped SLICE to new nextpnr split style SLICE
+def postprocess_timing_data(cells):
+    def delay_diff(x, y):
+        return (x[0] - y[0], x[1] - y[1])
+
+    split_cells = {}
+    comb_delays = {}
+    comb_delays[("A", "F")] = delay_db["SLOGICB"][("A0", "F0")]
+    comb_delays[("B", "F")] = delay_db["SLOGICB"][("B0", "F0")]
+    comb_delays[("C", "F")] = delay_db["SLOGICB"][("C0", "F0")]
+    comb_delays[("D", "F")] = delay_db["SLOGICB"][("D0", "F0")]
+    comb_delays[("A", "OFX")] = delay_db["SLOGICB"][("A0", "OFX0")]
+    comb_delays[("B", "OFX")] = delay_db["SLOGICB"][("B0", "OFX0")]
+    comb_delays[("C", "OFX")] = delay_db["SLOGICB"][("C0", "OFX0")]
+    comb_delays[("D", "OFX")] = delay_db["SLOGICB"][("D0", "OFX0")]
+    comb_delays[("M", "OFX")] = delay_db["SLOGICB"][("M0", "OFX0")] # worst case
+    comb_delays[("F1", "OFX")] = delay_diff(delay_db["SLOGICB"][("A1", "OFX0")],
+                                            delay_db["SLOGICB"][("A1", "F1")])
+    comb_delays[("FXA", "OFX")] = delay_db["SLOGICB"][("FXA", "OFX1")]
+    comb_delays[("FXB", "OFX")] = delay_db["SLOGICB"][("FXB", "OFX1")]
+    split_cells["TRELLIS_COMB"] = comb_delays
+
+    carry0_delays = {}
+    carry0_delays[("A", "F")] = delay_db["SCCU2C"][("A0", "F0")]
+    carry0_delays[("B", "F")] = delay_db["SCCU2C"][("B0", "F0")]
+    carry0_delays[("C", "F")] = delay_db["SCCU2C"][("C0", "F0")]
+    carry0_delays[("D", "F")] = delay_db["SCCU2C"][("D0", "F0")]
+    carry0_delays[("A", "FCO")] = delay_db["SCCU2C"][("A0", "FCO")]
+    carry0_delays[("B", "FCO")] = delay_db["SCCU2C"][("B0", "FCO")]
+    carry0_delays[("C", "FCO")] = delay_db["SCCU2C"][("C0", "FCO")]
+    carry0_delays[("D", "FCO")] = delay_db["SCCU2C"][("D0", "FCO")]
+    carry0_delays[("FCI", "F")] = delay_db["SCCU2C"][("FCI", "F0")]
+    carry0_delays[("FCI", "FCO")] = delay_db["SCCU2C"][("FCI", "FCO")]
+
+    split_cells["TRELLIS_COMB_CARRY0"] = carry0_delays
+
+    carry1_delays = {}
+    carry1_delays[("A", "F")] = delay_db["SCCU2C"][("A1", "F1")]
+    carry1_delays[("B", "F")] = delay_db["SCCU2C"][("B1", "F1")]
+    carry1_delays[("C", "F")] = delay_db["SCCU2C"][("C1", "F1")]
+    carry1_delays[("D", "F")] = delay_db["SCCU2C"][("D1", "F1")]
+    carry1_delays[("A", "FCO")] = delay_db["SCCU2C"][("A1", "FCO")]
+    carry1_delays[("B", "FCO")] = delay_db["SCCU2C"][("B1", "FCO")]
+    carry1_delays[("C", "FCO")] = delay_db["SCCU2C"][("C1", "FCO")]
+    carry1_delays[("D", "FCO")] = delay_db["SCCU2C"][("D1", "FCO")]
+    carry1_delays[("FCI", "F")] = delay_diff(delay_db["SCCU2C"][("FCI", "F1")], delay_db["SCCU2C"][("FCI", "FCO")])
+    carry1_delays[("FCI", "FCO")] = (0, 0)
+
+    split_cells["TRELLIS_COMB_CARRY1"] = carry1_delays
+
+    for celltype, celldelays in sorted(split_cells.items()):
+        delays = []
+        setupholds = []
+        for (from_pin, to_pin), (min_delay, max_delay) in sorted(celldelays.items()):
+            delays.append((constids[from_pin], constids[to_pin], min_delay, max_delay))
+        cells.append((constids[celltype], delays, setupholds))
+
 def process_timing_data():
     for grade in speed_grade_names:
         with open(timing_dbs.cells_db_path("ECP5", grade)) as f:
@@ -317,6 +383,7 @@ def process_timing_data():
             celltype = constids[cell.replace(":", "_").replace("=", "_").replace(",", "_")]
             delays = []
             setupholds = []
+            delay_db[cell] = {}
             for entry in cdata:
                 if entry["type"] == "Width":
                     continue
@@ -329,6 +396,7 @@ def process_timing_data():
                         to_pin = timing_port_xform[to_pin]
                     min_delay = min(entry["rising"][0], entry["falling"][0])
                     max_delay = min(entry["rising"][2], entry["falling"][2])
+                    delay_db[cell][(from_pin, to_pin)] = (min_delay, max_delay)
                     delays.append((constids[from_pin], constids[to_pin], min_delay, max_delay))
                 elif entry["type"] == "SetupHold":
                     if type(entry["pin"]) is list:
@@ -343,6 +411,7 @@ def process_timing_data():
                 else:
                     assert False, entry["type"]
             cells.append((celltype, delays, setupholds))
+        postprocess_timing_data(cells)
         pip_class_delays = []
         for i in range(len(pip_class_to_idx)):
             pip_class_delays.append((50, 50, 0, 0))
@@ -413,17 +482,18 @@ def write_database(dev_name, chip, ddrg, endianness):
             for arc in loctype.arcs:
                 write_loc(arc.srcWire.rel, "src")
                 write_loc(arc.sinkWire.rel, "dst")
-                bba.u32(arc.srcWire.id, "src_idx")
-                bba.u32(arc.sinkWire.id, "dst_idx")
+                bba.u16(arc.srcWire.id, "src_idx")
+                bba.u16(arc.sinkWire.id, "dst_idx")
                 src_name = get_wire_name(idx, arc.srcWire.rel, arc.srcWire.id)
                 snk_name = get_wire_name(idx, arc.sinkWire.rel, arc.sinkWire.id)
-                bba.u32(get_pip_class(src_name, snk_name), "timing_class")
-                bba.u16(get_tiletype_index(ddrg.to_str(arc.tiletype)), "tile_type")
+                bba.u16(get_pip_class(src_name, snk_name), "timing_class")
+                bba.u8(get_tiletype_index(ddrg.to_str(arc.tiletype)), "tile_type")
                 cls = arc.cls
                 if cls == 1 and "PCS" in snk_name or "DCU" in snk_name or "DCU" in src_name:
                    cls = 2
                 bba.u8(cls, "pip_type")
-                bba.u8(0, "padding")
+                bba.u16(arc.lutperm_flags, "lutperm_flags")
+                bba.u16(0, "padding")
         if len(loctype.wires) > 0:
             for wire_idx in range(len(loctype.wires)):
                 wire = loctype.wires[wire_idx]
@@ -447,11 +517,11 @@ def write_database(dev_name, chip, ddrg, endianness):
             for wire_idx in range(len(loctype.wires)):
                 wire = loctype.wires[wire_idx]
                 bba.s(ddrg.to_str(wire.name), "name")
-                bba.u32(constids[wire_type(ddrg.to_str(wire.name))], "type")
+                bba.u16(constids[wire_type(ddrg.to_str(wire.name))], "type")
                 if ("TILE_WIRE_" + ddrg.to_str(wire.name)) in gfx_wire_ids:
-                    bba.u32(gfx_wire_ids["TILE_WIRE_" + ddrg.to_str(wire.name)], "tile_wire")
+                    bba.u16(gfx_wire_ids["TILE_WIRE_" + ddrg.to_str(wire.name)], "tile_wire")
                 else:
-                    bba.u32(0, "tile_wire")
+                    bba.u16(0, "tile_wire")
                 bba.r_slice("loc%d_wire%d_uppips" % (idx, wire_idx) if len(wire.arcsUphill) > 0 else None, len(wire.arcsUphill), "pips_uphill")
                 bba.r_slice("loc%d_wire%d_downpips" % (idx, wire_idx) if len(wire.arcsDownhill) > 0 else None, len(wire.arcsDownhill), "pips_downhill")
                 bba.r_slice("loc%d_wire%d_belpins" % (idx, wire_idx) if len(wire.belPins) > 0 else None, len(wire.belPins), "bel_pins")
@@ -621,11 +691,14 @@ def main():
     # print("Initialising chip...")
     chip = pytrellis.Chip(dev_names[args.device])
     # print("Building routing graph...")
-    ddrg = pytrellis.make_dedup_chipdb(chip)
+    ddrg = pytrellis.make_dedup_chipdb(chip, include_lutperm_pips=True, split_slice_mode=True)
     max_row = chip.get_max_row()
     max_col = chip.get_max_col()
     process_timing_data()
-    process_pio_db(ddrg, args.device)
+    process_pio_db(ddrg, dev_names[args.device])
+    # add TQFP144 package from non-SERDES device if appropriate
+    if args.device == "25k": process_pio_db(ddrg, "LFE5U-25F", {"TQFP144", })
+    if args.device == "45k": process_pio_db(ddrg, "LFE5U-45F", {"TQFP144", })
     process_loc_globals(chip)
     # print("{} unique location types".format(len(ddrg.locationTypes)))
     bba = write_database(args.device, chip, ddrg, "le")

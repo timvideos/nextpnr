@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -60,17 +60,12 @@ class PeriodicRunner : public QThread
     void run(void) override
     {
         for (;;) {
-            mutex_.lock();
+            QMutexLocker locker(&mutex_);
             condition_.wait(&mutex_);
-
             if (abort_) {
-                mutex_.unlock();
                 return;
             }
-
             target_();
-
-            mutex_.unlock();
         }
     }
 
@@ -78,11 +73,11 @@ class PeriodicRunner : public QThread
 
     ~PeriodicRunner()
     {
-        mutex_.lock();
-        abort_ = true;
-        condition_.wakeOne();
-        mutex_.unlock();
-
+        {
+            QMutexLocker locker(&mutex_);
+            abort_ = true;
+            condition_.wakeOne();
+        }
         wait();
     }
 

@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -78,7 +78,7 @@ template <> struct string_converter<PipId>
 
 template <> struct string_converter<BelPin>
 {
-    BelPin from_str(Context *ctx, std::string name)
+    BelPin from_str(Context * /*ctx*/, std::string /*name*/)
     {
         NPNR_ASSERT_FALSE("string_converter<BelPin>::from_str not implemented");
     }

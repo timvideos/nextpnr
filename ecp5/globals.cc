@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -20,7 +20,9 @@
 #include "globals.h"
 #include <algorithm>
 #include <iomanip>
+#include <optional>
 #include <queue>
+
 #include "cells.h"
 #include "log.h"
 #include "nextpnr.h"
@@ -48,34 +50,56 @@ static std::string get_quad_name(GlobalQuadrant quad)
 class Ecp5GlobalRouter
 {
   public:
-    Ecp5GlobalRouter(Context *ctx) : ctx(ctx){};
+    Ecp5GlobalRouter(Context *ctx) : ctx(ctx) {};
 
   private:
+    struct DccMetric
+    {
+        DccMetric(wirelen_t wirelen, bool dedicated_routing, int hops)
+                : wirelen(wirelen), dedicated_routing(dedicated_routing), hops(hops) {};
+        wirelen_t wirelen;
+        bool dedicated_routing;
+        int hops;
+        bool operator<(const DccMetric &other)
+        {
+            if (dedicated_routing) {
+                return !other.dedicated_routing || hops < other.hops;
+            } else {
+                return !other.dedicated_routing && wirelen < other.wirelen;
+            }
+        }
+    };
+
     bool is_clock_port(const PortRef &user)
     {
-        if (user.cell->type == id_TRELLIS_SLICE && (user.port == id_CLK || user.port == id_WCK))
+        if (user.cell->type == id_TRELLIS_FF && user.port == id_CLK)
             return true;
-        if (user.cell->type == id_DCUA && (user.port == id_CH0_FF_RXI_CLK || user.port == id_CH1_FF_RXI_CLK ||
-                                           user.port == id_CH0_FF_TXI_CLK || user.port == id_CH1_FF_TXI_CLK))
+        if (user.cell->type == id_TRELLIS_COMB && user.port == id_WCK)
             return true;
-        if ((user.cell->type == id_IOLOGIC || user.cell->type == id_SIOLOGIC) && (user.port == id_CLK))
+        if (user.cell->type == id_DCUA &&
+            (user.port.in(id_CH0_FF_RXI_CLK, id_CH1_FF_RXI_CLK, id_CH0_FF_TXI_CLK, id_CH1_FF_TXI_CLK)))
+            return true;
+        if ((user.cell->type.in(id_IOLOGIC, id_SIOLOGIC)) && (user.port == id_CLK))
             return true;
         return false;
     }
 
     bool is_logic_port(const PortRef &user)
     {
-        if (user.cell->type == id_TRELLIS_SLICE && user.port != id_CLK && user.port != id_WCK)
+        if (user.cell->type == id_TRELLIS_FF && user.port != id_CLK)
+            return true;
+        if (user.cell->type == id_TRELLIS_COMB && user.port != id_WCK)
             return true;
         return false;
     }
 
     std::vector<NetInfo *> get_clocks()
     {
-        std::unordered_map<IdString, int> clockCount;
+        dict<IdString, int> clockCount;
         for (auto &net : ctx->nets) {
             NetInfo *ni = net.second.get();
-            if (ni->name == ctx->id("$PACKER_GND_NET") || ni->name == ctx->id("$PACKER_VCC_NET"))
+            if (ni->name == ctx->id("$PACKER_GND_NET") || ni->name == ctx->id("$PACKER_VCC_NET") ||
+                ni->driver.cell == nullptr)
                 continue;
             clockCount[ni->name] = 0;
             for (const auto &user : ni->users) {
@@ -83,7 +107,7 @@ class Ecp5GlobalRouter
                     clockCount[ni->name]++;
                     if (user.cell->type == id_DCUA)
                         clockCount[ni->name] += 100;
-                    if (user.cell->type == id_IOLOGIC || user.cell->type == id_SIOLOGIC)
+                    if (user.cell->type.in(id_IOLOGIC, id_SIOLOGIC))
                         clockCount[ni->name] += 10;
                 }
             }
@@ -91,8 +115,8 @@ class Ecp5GlobalRouter
         }
         // DCCAs must always drive globals
         std::vector<NetInfo *> clocks;
-        for (auto &cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (ci->type == id_DCCA) {
                 NetInfo *glb = ci->ports.at(id_CLKO).net;
                 if (glb != nullptr) {
@@ -147,7 +171,7 @@ class Ecp5GlobalRouter
         WireId globalWire;
         IdString global_name = ctx->id(fmt_str("G_HPBX" << std::setw(2) << std::setfill('0') << global_index << "00"));
         std::queue<WireId> upstream;
-        std::unordered_map<WireId, PipId> backtrace;
+        dict<WireId, PipId> backtrace;
         upstream.push(userWire);
         bool already_routed = false;
         WireId next;
@@ -230,7 +254,7 @@ class Ecp5GlobalRouter
     bool simple_router(NetInfo *net, WireId src, WireId dst, bool allow_fail = false)
     {
         std::queue<WireId> visit;
-        std::unordered_map<WireId, PipId> backtrace;
+        dict<WireId, PipId> backtrace;
         visit.push(src);
         WireId cursor;
         while (true) {
@@ -277,7 +301,7 @@ class Ecp5GlobalRouter
     bool route_onto_global(NetInfo *net, int network)
     {
         WireId glb_src;
-        NPNR_ASSERT(net->driver.cell->type == id_DCCA);
+        NPNR_ASSERT(net->driver.cell->type.in(id_DCCA, id_DCSC));
         glb_src = ctx->getNetinfoSourceWire(net);
         for (int quad = QUAD_UL; quad < QUAD_LR + 1; quad++) {
             WireId glb_dst = get_global_wire(GlobalQuadrant(quad), network);
@@ -290,16 +314,15 @@ class Ecp5GlobalRouter
     }
 
     // Get DCC wirelength based on source
-    wirelen_t get_dcc_wirelen(CellInfo *dcc, bool &dedicated_routing)
+    DccMetric get_dcc_metric(CellInfo *dcc)
     {
-        NetInfo *clki = dcc->ports.at(id_CLKI).net;
+        NetInfo *clki = dcc->ports.at((dcc->type == id_DCSC) ? id_CLK0 : id_CLKI).net;
         BelId drv_bel;
         const PortRef &drv = clki->driver;
-        dedicated_routing = false;
         if (drv.cell == nullptr) {
-            return 0;
-        } else if (drv.cell->attrs.count(ctx->id("BEL"))) {
-            drv_bel = ctx->getBelByNameStr(drv.cell->attrs.at(ctx->id("BEL")).as_string());
+            return DccMetric(0, false, 0);
+        } else if (drv.cell->attrs.count(id_BEL)) {
+            drv_bel = ctx->getBelByNameStr(drv.cell->attrs.at(id_BEL).as_string());
         } else {
             // Check if driver is a singleton
             BelId last_bel;
@@ -320,63 +343,48 @@ class Ecp5GlobalRouter
         if (drv_bel == BelId()) {
             // Driver is not locked. Use standard metric
             float tns;
-            return get_net_metric(ctx, clki, MetricType::WIRELENGTH, tns);
+            return DccMetric(get_net_metric(ctx, clki, MetricType::WIRELENGTH, tns), false, 0);
         } else {
             // Check for dedicated routing
-            if (has_short_route(ctx->getBelPinWire(drv_bel, drv.port), ctx->getBelPinWire(dcc->bel, id_CLKI))) {
+            if (auto hops =
+                        has_short_route(ctx->getBelPinWire(drv_bel, drv.port), ctx->getBelPinWire(dcc->bel, id_CLKI))) {
                 // log_info("dedicated route %s -> %s\n", ctx->nameOfWire(ctx->getBelPinWire(drv_bel,
                 // drv.port)), ctx->nameOfWire(dcc->bel));
-                dedicated_routing = true;
-                return 0;
+                return DccMetric(0, true, *hops);
             }
             // Driver is locked
             Loc dcc_loc = ctx->getBelLocation(dcc->bel);
             Loc drv_loc = ctx->getBelLocation(drv_bel);
-            return std::abs(dcc_loc.x - drv_loc.x) + std::abs(dcc_loc.y - drv_loc.y);
+            return DccMetric(std::abs(dcc_loc.x - drv_loc.x) + std::abs(dcc_loc.y - drv_loc.y), false, 0);
         }
     }
 
-    // Return true if a short (<5) route exists between two wires
-    bool has_short_route(WireId src, WireId dst, int thresh = 7)
+    // Return hop count if a short (<5) route exists between two wires
+    std::optional<int> has_short_route(WireId src, WireId dst, int thresh = 7)
     {
-        std::queue<WireId> visit;
-        std::unordered_map<WireId, PipId> backtrace;
-        visit.push(src);
-        WireId cursor;
-        while (true) {
-
-            if (visit.empty() || visit.size() > 10000) {
-                // log_info ("dist %s -> %s = inf\n", ctx->nameOfWire(src),
-                // ctx->nameOfWire(dst));
-                return false;
-            }
-            cursor = visit.front();
+        std::queue<std::pair<WireId, int>> visit;
+        pool<WireId> seen;
+        visit.emplace(src, 0);
+        while (!visit.empty()) {
+            auto cursor = visit.front();
             visit.pop();
-
-            if (cursor == dst)
-                break;
-            for (auto dh : ctx->getPipsDownhill(cursor)) {
-                WireId pipDst = ctx->getPipDstWire(dh);
-                if (backtrace.count(pipDst))
-                    continue;
-                backtrace[pipDst] = dh;
-                visit.push(pipDst);
+            if (cursor.first == dst) {
+                return cursor.second;
+            }
+            if (cursor.second < (thresh - 1)) {
+                for (auto dh : ctx->getPipsDownhill(cursor.first)) {
+                    WireId pipDst = ctx->getPipDstWire(dh);
+                    if (seen.count(pipDst))
+                        continue;
+                    seen.insert(pipDst);
+                    visit.emplace(pipDst, cursor.second + 1);
+                }
             }
         }
-        int length = 0;
-        while (true) {
-            auto fnd = backtrace.find(cursor);
-            if (fnd == backtrace.end())
-                break;
-            cursor = ctx->getPipSrcWire(fnd->second);
-            length++;
-        }
-        // log_info ("dist %s -> %s = %d\n", ctx->nameOfWire(src), ctx->nameOfWire(dst),
-        // length);
-        return length < thresh;
+        return {};
     }
 
-    std::unordered_set<WireId> used_pclkcib;
+    pool<WireId> used_pclkcib;
 
     std::set<WireId> get_candidate_pclkcibs(BelId dcc)
     {
@@ -394,15 +402,14 @@ class Ecp5GlobalRouter
     }
 
     // Attempt to place a DCC
-    void place_dcc(CellInfo *dcc)
+    void place_dcc_dcs(CellInfo *dcc)
     {
         BelId best_bel;
         WireId best_bel_pclkcib;
-        bool using_ce = get_net_or_empty(dcc, ctx->id("CE")) != nullptr;
-        wirelen_t best_wirelen = 9999999;
-        bool dedicated_routing = false;
+        bool using_ce = dcc->getPort(id_CE) != nullptr;
+        DccMetric best_metric(9999999, false, 0);
         for (auto bel : ctx->getBels()) {
-            if (ctx->getBelType(bel) == id_DCCA && ctx->checkBelAvail(bel)) {
+            if (ctx->getBelType(bel) == dcc->type && ctx->checkBelAvail(bel)) {
                 std::string belname = ctx->loc_info(bel)->bel_data[bel.index].name.get();
                 if (belname.at(0) == 'D' && using_ce)
                     continue; // don't allow DCCs with CE at center
@@ -411,9 +418,9 @@ class Ecp5GlobalRouter
                     ctx->unbindBel(bel);
                     continue;
                 }
-                wirelen_t wirelen = get_dcc_wirelen(dcc, dedicated_routing);
-                if (wirelen < best_wirelen) {
-                    if (dedicated_routing) {
+                auto metric = get_dcc_metric(dcc);
+                if (metric < best_metric) {
+                    if (metric.dedicated_routing || dcc->type == id_DCSC) {
                         best_bel_pclkcib = WireId();
                     } else {
                         bool found_pclkcib = false;
@@ -428,7 +435,7 @@ class Ecp5GlobalRouter
                             goto pclkcib_fail;
                     }
                     best_bel = bel;
-                    best_wirelen = wirelen;
+                    best_metric = metric;
                 }
             pclkcib_fail:
                 ctx->unbindBel(bel);
@@ -445,61 +452,59 @@ class Ecp5GlobalRouter
     }
 
     // Insert a DCC into a net to promote it to a global
-    NetInfo *insert_dcc(NetInfo *net)
+    NetInfo *insert_dcc(NetInfo *net, CellInfo *dcs_cell = nullptr)
     {
         NetInfo *glbptr = nullptr;
         CellInfo *dccptr = nullptr;
-        if (net->driver.cell != nullptr && net->driver.cell->type == id_DCCA) {
+        if (net->driver.cell != nullptr && (net->driver.cell->type.in(id_DCCA, id_DCSC))) {
             // Already have a DCC (such as clock gating)
             glbptr = net;
             dccptr = net->driver.cell;
         } else {
             auto dcc = create_ecp5_cell(ctx, id_DCCA, "$gbuf$" + net->name.str(ctx));
-            std::unique_ptr<NetInfo> glbnet = std::unique_ptr<NetInfo>(new NetInfo);
-            glbnet->name = ctx->id("$glbnet$" + net->name.str(ctx));
-            glbnet->driver.cell = dcc.get();
-            glbnet->driver.port = id_CLKO;
-            dcc->ports[id_CLKO].net = glbnet.get();
+            glbptr = ctx->createNet(ctx->id("$glbnet$" + net->name.str(ctx)));
+            glbptr->driver.cell = dcc.get();
+            glbptr->driver.port = id_CLKO;
+            dcc->ports[id_CLKO].net = glbptr;
             std::vector<PortRef> keep_users;
             for (auto user : net->users) {
-                if (user.port == id_CLKFB) {
+                if (dcs_cell != nullptr && user.cell != dcs_cell) {
+                    // DCS DCC insertion mode
+                    keep_users.push_back(user);
+                } else if (user.port == id_CLKFB) {
                     keep_users.push_back(user);
                 } else if (net->driver.cell->type == id_EXTREFB && user.cell->type == id_DCUA) {
                     keep_users.push_back(user);
                 } else if (is_logic_port(user)) {
                     keep_users.push_back(user);
                 } else {
-                    glbnet->users.push_back(user);
-                    user.cell->ports.at(user.port).net = glbnet.get();
+                    user.cell->ports.at(user.port).net = glbptr;
+                    user.cell->ports.at(user.port).user_idx = glbptr->users.add(user);
                 }
             }
-            net->users = keep_users;
+            net->users.clear();
+            for (auto &usr : keep_users)
+                usr.cell->ports.at(usr.port).user_idx = net->users.add(usr);
 
-            dcc->ports[id_CLKI].net = net;
-            PortRef clki_pr;
-            clki_pr.port = id_CLKI;
-            clki_pr.cell = dcc.get();
-            net->users.push_back(clki_pr);
+            dcc->connectPort(id_CLKI, net);
             if (net->clkconstr) {
-                glbnet->clkconstr = std::unique_ptr<ClockConstraint>(new ClockConstraint());
-                glbnet->clkconstr->low = net->clkconstr->low;
-                glbnet->clkconstr->high = net->clkconstr->high;
-                glbnet->clkconstr->period = net->clkconstr->period;
+                glbptr->clkconstr = std::unique_ptr<ClockConstraint>(new ClockConstraint());
+                glbptr->clkconstr->low = net->clkconstr->low;
+                glbptr->clkconstr->high = net->clkconstr->high;
+                glbptr->clkconstr->period = net->clkconstr->period;
             }
-            glbptr = glbnet.get();
-            ctx->nets[glbnet->name] = std::move(glbnet);
             dccptr = dcc.get();
             ctx->cells[dcc->name] = std::move(dcc);
         }
-        glbptr->attrs[ctx->id("ECP5_IS_GLOBAL")] = 1;
-        if (str_or_default(dccptr->attrs, ctx->id("BEL"), "") == "")
-            place_dcc(dccptr);
+        glbptr->attrs[id_ECP5_IS_GLOBAL] = 1;
+        if (str_or_default(dccptr->attrs, id_BEL, "") == "")
+            place_dcc_dcs(dccptr);
         return glbptr;
     }
 
     int global_route_priority(const PortRef &load)
     {
-        if (load.port == id_WCK || load.port == id_WRE)
+        if (load.port.in(id_WCK, id_WRE))
             return 90;
         return 99;
     }
@@ -509,12 +514,13 @@ class Ecp5GlobalRouter
   public:
     void promote_globals()
     {
+        bool disable_promotion = bool_or_default(ctx->settings, ctx->id("arch.no-promote-globals"));
         bool is_ooc = bool_or_default(ctx->settings, ctx->id("arch.ooc"));
         log_info("Promoting globals...\n");
         auto clocks = get_clocks();
         for (auto clock : clocks) {
-            bool is_noglobal = bool_or_default(clock->attrs, ctx->id("noglobal"), false) ||
-                               bool_or_default(clock->attrs, ctx->id("ECP5_IS_GLOBAL"), false);
+            bool is_noglobal = disable_promotion || bool_or_default(clock->attrs, id_noglobal, false) ||
+                               bool_or_default(clock->attrs, id_ECP5_IS_GLOBAL, false);
             if (is_noglobal)
                 continue;
             log_info("    promoting clock net %s to global network\n", clock->name.c_str(ctx));
@@ -522,6 +528,20 @@ class Ecp5GlobalRouter
                 clock->is_global = true;
             else
                 insert_dcc(clock);
+        }
+        // Insert DCCs on DCS inputs, too
+        std::vector<CellInfo *> dcsc_cells;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->type == id_DCSC)
+                dcsc_cells.push_back(ci);
+        }
+        for (auto ci : dcsc_cells) {
+            for (auto port : {id_CLK0, id_CLK1}) {
+                NetInfo *net = ci->getPort(port);
+                if (net != nullptr)
+                    insert_dcc(net, ci);
+            }
         }
     }
 
@@ -535,15 +555,19 @@ class Ecp5GlobalRouter
                 fab_globals.insert(i);
         }
         std::vector<std::pair<PortRef *, int>> toroute;
-        std::unordered_map<int, NetInfo *> clocks;
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
-            if (ci->type == id_DCCA) {
-                NetInfo *clock = ci->ports.at(id_CLKO).net;
+        dict<int, NetInfo *> clocks;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->type.in(id_DCCA, id_DCSC)) {
+                NetInfo *clock = ci->ports.at((ci->type == id_DCSC) ? id_DCSOUT : id_CLKO).net;
                 NPNR_ASSERT(clock != nullptr);
-                bool drives_fabric = std::any_of(clock->users.begin(), clock->users.end(),
-                                                 [this](const PortRef &port) { return !is_clock_port(port); });
-
+                bool drives_fabric = false;
+                for (auto &usr : clock->users) {
+                    if (!is_clock_port(usr)) {
+                        drives_fabric = true;
+                        break;
+                    }
+                }
                 int glbid;
                 if (drives_fabric) {
                     if (fab_globals.empty())
@@ -570,6 +594,12 @@ class Ecp5GlobalRouter
                       return global_route_priority(*a.first) < global_route_priority(*b.first);
                   });
         for (const auto &user : toroute) {
+            if (user.first->cell->type == id_DCSC && (user.first->port.in(id_CLK0, id_CLK1))) {
+                // Special case, skips most of the typical global network
+                NetInfo *net = clocks.at(user.second);
+                simple_router(net, ctx->getNetinfoSourceWire(net), ctx->getNetinfoSinkWire(net, *(user.first), 0));
+                continue;
+            }
             route_logic_tile_global(clocks.at(user.second), user.second, *user.first);
         }
     }
@@ -577,25 +607,25 @@ class Ecp5GlobalRouter
     void route_eclk_sources()
     {
         // Try and use dedicated paths if possible
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
-            if (ci->type == id_ECLKSYNCB || ci->type == id_TRELLIS_ECLKBUF || ci->type == id_ECLKBRIDGECS) {
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->type.in(id_ECLKSYNCB, id_TRELLIS_ECLKBUF, id_ECLKBRIDGECS)) {
                 std::vector<IdString> pins;
-                if (ci->type == id_ECLKSYNCB || ci->type == id_TRELLIS_ECLKBUF) {
+                if (ci->type.in(id_ECLKSYNCB, id_TRELLIS_ECLKBUF)) {
                     pins.push_back(id_ECLKI);
                 } else {
                     pins.push_back(id_CLK0);
                     pins.push_back(id_CLK1);
                 }
                 for (auto pin : pins) {
-                    NetInfo *ni = get_net_or_empty(ci, pin);
+                    NetInfo *ni = ci->getPort(pin);
                     if (ni == nullptr)
                         continue;
                     log_info("    trying dedicated routing for edge clock source %s\n", ctx->nameOf(ni));
                     WireId src = ctx->getNetinfoSourceWire(ni);
                     WireId dst = ctx->getBelPinWire(ci->bel, pin);
                     std::queue<WireId> visit;
-                    std::unordered_map<WireId, PipId> backtrace;
+                    dict<WireId, PipId> backtrace;
                     visit.push(dst);
                     int iter = 0;
                     WireId cursor;

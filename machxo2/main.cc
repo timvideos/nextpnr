@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Claire Xen <claire@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
  *  Copyright (C) 2021  William D. Jones <wjones@wdj-consulting.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -18,8 +18,6 @@
  *
  */
 
-#ifdef MAIN_EXECUTABLE
-
 #include <fstream>
 #include "bitstream.h"
 #include "command.h"
@@ -33,9 +31,10 @@ class MachXO2CommandHandler : public CommandHandler
 {
   public:
     MachXO2CommandHandler(int argc, char **argv);
-    virtual ~MachXO2CommandHandler(){};
-    std::unique_ptr<Context> createContext(std::unordered_map<std::string, Property> &values) override;
-    void setupArchContext(Context *ctx) override{};
+    virtual ~MachXO2CommandHandler() {};
+    std::unique_ptr<Context> createContext(dict<std::string, Property> &values) override;
+    void setupArchContext(Context *ctx) override {};
+    void customAfterLoad(Context *ctx) override;
     void customBitstream(Context *ctx) override;
 
   protected:
@@ -47,29 +46,15 @@ MachXO2CommandHandler::MachXO2CommandHandler(int argc, char **argv) : CommandHan
 po::options_description MachXO2CommandHandler::getArchOptions()
 {
     po::options_description specific("Architecture specific options");
-    if (Arch::is_available(ArchArgs::LCMXO2_256HC))
-        specific.add_options()("256", "set device type to LCMXO2-256HC");
-    if (Arch::is_available(ArchArgs::LCMXO2_640HC))
-        specific.add_options()("640", "set device type to LCMXO2-640HC");
-    if (Arch::is_available(ArchArgs::LCMXO2_1200HC))
-        specific.add_options()("1200", "set device type to LCMXO2-1200HC");
-    if (Arch::is_available(ArchArgs::LCMXO2_2000HC))
-        specific.add_options()("2000", "set device type to LCMXO2-2000HC");
-    if (Arch::is_available(ArchArgs::LCMXO2_4000HC))
-        specific.add_options()("4000", "set device type to LCMXO2-4000HC");
-    if (Arch::is_available(ArchArgs::LCMXO2_7000HC))
-        specific.add_options()("7000", "set device type to LCMXO2-7000HC");
-
-    specific.add_options()("package", po::value<std::string>(), "select device package");
-    specific.add_options()("speed", po::value<int>(), "select device speedgrade (1 to 6 inclusive)");
-
-    specific.add_options()("override-basecfg", po::value<std::string>(),
-                           "base chip configuration in Trellis text format");
+    specific.add_options()("device", po::value<std::string>(), "device name");
+    specific.add_options()("list-devices", "list all supported device names");
     specific.add_options()("textcfg", po::value<std::string>(), "textual configuration in Trellis format to write");
 
-    // specific.add_options()("lpf", po::value<std::vector<std::string>>(), "LPF pin constraint file(s)");
+    specific.add_options()("lpf", po::value<std::vector<std::string>>(), "LPF pin constraint file(s)");
+    specific.add_options()("lpf-allow-unconstrained", "don't require LPF file(s) to constrain all IO");
 
-    specific.add_options()("no-iobs", "disable automatic IO buffer insertion (unimplemented- always enabled)");
+    specific.add_options()("disable-router-lutperm", "don't allow the router to permute LUT inputs");
+
     return specific;
 }
 
@@ -82,35 +67,51 @@ void MachXO2CommandHandler::customBitstream(Context *ctx)
     write_bitstream(ctx, textcfg);
 }
 
-std::unique_ptr<Context> MachXO2CommandHandler::createContext(std::unordered_map<std::string, Property> &values)
+std::unique_ptr<Context> MachXO2CommandHandler::createContext(dict<std::string, Property> &values)
 {
     ArchArgs chipArgs;
-    chipArgs.type = ArchArgs::NONE;
-    if (vm.count("256"))
-        chipArgs.type = ArchArgs::LCMXO2_256HC;
-    if (vm.count("640"))
-        chipArgs.type = ArchArgs::LCMXO2_640HC;
-    if (vm.count("1200"))
-        chipArgs.type = ArchArgs::LCMXO2_1200HC;
-    if (vm.count("2000"))
-        chipArgs.type = ArchArgs::LCMXO2_2000HC;
-    if (vm.count("4000"))
-        chipArgs.type = ArchArgs::LCMXO2_4000HC;
-    if (vm.count("7000"))
-        chipArgs.type = ArchArgs::LCMXO2_7000HC;
-    if (vm.count("package"))
-        chipArgs.package = vm["package"].as<std::string>();
-
-    if (values.find("arch.name") != values.end()) {
-        std::string arch_name = values["arch.name"].as_string();
-        if (arch_name != "machxo2")
-            log_error("Unsuported architecture '%s'.\n", arch_name.c_str());
+    if (vm.count("list-devices")) {
+        Arch::list_devices();
+        exit(0);
     }
-
+    if (!vm.count("device")) {
+        log_error("device must be specified on the command line (e.g. --device LCMXO2-1200HC-4SG32C)\n");
+    }
+    chipArgs.device = vm["device"].as<std::string>();
     auto ctx = std::unique_ptr<Context>(new Context(chipArgs));
-    if (vm.count("no-iobs"))
-        ctx->settings[ctx->id("disable_iobs")] = Property::State::S1;
+    if (vm.count("disable-router-lutperm"))
+        ctx->settings[ctx->id("arch.disable_router_lutperm")] = 1;
     return ctx;
+}
+
+void MachXO2CommandHandler::customAfterLoad(Context *ctx)
+{
+    if (vm.count("lpf")) {
+        std::vector<std::string> files = vm["lpf"].as<std::vector<std::string>>();
+        for (const auto &filename : files) {
+            std::ifstream in(filename);
+            if (!in)
+                log_error("failed to open LPF file '%s'\n", filename.c_str());
+            if (!ctx->apply_lpf(filename, in))
+                log_error("failed to parse LPF file '%s'\n", filename.c_str());
+        }
+
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->type == ctx->id("$nextpnr_ibuf") || ci->type == ctx->id("$nextpnr_obuf") ||
+                ci->type == ctx->id("$nextpnr_iobuf")) {
+                if (!ci->attrs.count(id_LOC)) {
+                    if (vm.count("lpf-allow-unconstrained"))
+                        log_warning("IO '%s' is unconstrained in LPF and will be automatically placed\n",
+                                    cell.first.c_str(ctx));
+                    else
+                        log_error("IO '%s' is unconstrained in LPF (override this error with "
+                                  "--lpf-allow-unconstrained)\n",
+                                  cell.first.c_str(ctx));
+                }
+            }
+        }
+    }
 }
 
 int main(int argc, char *argv[])
@@ -118,5 +119,3 @@ int main(int argc, char *argv[])
     MachXO2CommandHandler handler(argc, argv);
     return handler.exec();
 }
-
-#endif

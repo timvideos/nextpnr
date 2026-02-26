@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -58,7 +58,7 @@ void IdList::updateElements(Context *ctx, std::vector<IdStringList> elements)
     bool changed = false;
 
     // For any elements that are not yet in managed_, created them.
-    std::unordered_set<IdStringList> element_set;
+    pool<IdStringList> element_set;
     for (auto elem : elements) {
         element_set.insert(elem);
         auto existing = managed_.find(elem);

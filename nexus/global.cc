@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -26,11 +26,23 @@
 
 NEXTPNR_NAMESPACE_BEGIN
 
+namespace {
+bool str_match(const std::string &s, const std::string &pattern)
+{
+    if (s.size() != pattern.size())
+        return false;
+    for (size_t i = 0; i < s.size(); i++)
+        if (pattern.at(i) != '?' && s.at(i) != pattern.at(i))
+            return false;
+    return true;
+}
+} // namespace
+
 struct NexusGlobalRouter
 {
     Context *ctx;
 
-    NexusGlobalRouter(Context *ctx) : ctx(ctx){};
+    NexusGlobalRouter(Context *ctx) : ctx(ctx) {};
 
     // When routing globals; we allow global->local for some tricky cases but never local->local
     bool global_pip_filter(PipId pip) const
@@ -42,14 +54,30 @@ struct NexusGlobalRouter
         return true;
     }
 
+    // These rules make sure global->fabric connections are always routeable, as they won't be ripup-able by the general
+    // router
+    bool routeability_pip_filter(PipId pip) const
+    {
+        IdString dest_basename(ctx->wire_data(ctx->getPipDstWire(pip)).name);
+        const std::string &s = dest_basename.str(ctx);
+        if (str_match(s, "JDI?_DIMUX")) {
+            IdString src_basename(ctx->wire_data(ctx->getPipSrcWire(pip)).name);
+            return str_match(src_basename.str(ctx), "JM?_DIMUX");
+        } else if (str_match(s, "JDL?_DRMUX")) {
+            IdString src_basename(ctx->wire_data(ctx->getPipSrcWire(pip)).name);
+            return str_match(src_basename.str(ctx), "JD?_DRMUX");
+        }
+        return true;
+    }
+
     // Dedicated backwards BFS routing for global networks
     template <typename Tfilt>
-    bool backwards_bfs_route(NetInfo *net, size_t user_idx, int iter_limit, bool strict, Tfilt pip_filter)
+    bool backwards_bfs_route(NetInfo *net, store_index<PortRef> user_idx, int iter_limit, bool strict, Tfilt pip_filter)
     {
         // Queue of wires to visit
         std::queue<WireId> visit;
         // Wire -> upstream pip
-        std::unordered_map<WireId, PipId> backtrace;
+        dict<WireId, PipId> backtrace;
 
         // Lookup source and destination wires
         WireId src = ctx->getNetinfoSourceWire(net);
@@ -138,29 +166,34 @@ struct NexusGlobalRouter
 
     bool is_relaxed_sink(const PortRef &sink) const
     {
-        // This DPHY clock port can't be routed without going through some general routing
-        if (sink.cell->type == id_DPHY_CORE && sink.port == id_URXCKINE)
+        // These DPHY clock ports can't be routed without going through some general routing
+        if (sink.cell->type == id_DPHY_CORE && sink.port.in(id_URXCKINE, id_UCENCK, id_UTXCKE, id_U3TDE5CK))
+            return true;
+        // Cases where global clocks are driving fabric
+        if ((sink.cell->type == id_OXIDE_COMB && sink.port != id_WCK) ||
+            (sink.cell->type == id_OXIDE_FF && sink.port != id_CLK))
             return true;
         return false;
     }
 
     void route_clk_net(NetInfo *net)
     {
-        for (size_t i = 0; i < net->users.size(); i++)
-            backwards_bfs_route(net, i, 1000000, true,
-                                [&](PipId pip) { return is_relaxed_sink(net->users.at(i)) || global_pip_filter(pip); });
+        for (auto usr : net->users.enumerate())
+            backwards_bfs_route(net, usr.index, 1000000, true, [&](PipId pip) {
+                return (is_relaxed_sink(usr.value) || global_pip_filter(pip)) && routeability_pip_filter(pip);
+            });
         log_info("    routed net '%s' using global resources\n", ctx->nameOf(net));
     }
 
     void operator()()
     {
         log_info("Routing globals...\n");
-        for (auto net : sorted(ctx->nets)) {
-            NetInfo *ni = net.second;
+        for (auto &net : ctx->nets) {
+            NetInfo *ni = net.second.get();
             CellInfo *drv = ni->driver.cell;
             if (drv == nullptr)
                 continue;
-            if (drv->type == id_DCC) {
+            if (drv->type.in(id_DCC, id_DCS)) {
                 route_clk_net(ni);
                 continue;
             }

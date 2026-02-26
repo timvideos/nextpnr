@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -24,6 +24,7 @@
 
 #include <boost/range/adaptor/reversed.hpp>
 #include <queue>
+#include <set>
 
 NEXTPNR_NAMESPACE_BEGIN
 namespace {
@@ -207,10 +208,12 @@ struct NexusFasmWriter
     void write_pip(PipId pip)
     {
         auto &pd = ctx->pip_data(pip);
-        if (pd.flags & PIP_FIXED_CONN)
+        if ((pd.flags & PIP_FIXED_CONN) || (pd.flags & PIP_LUT_PERM))
             return;
         std::string tile = tile_name(pip.tile, tile_by_type_and_loc(pip.tile, IdString(pd.tile_type)));
         std::string source_wire = escape_name(ctx->pip_src_wire_name(pip).str(ctx));
+        if (source_wire == "LOCAL_VCC")
+            source_wire = "G__VCC";
         std::string dest_wire = escape_name(ctx->pip_dst_wire_name(pip).str(ctx));
         out << stringf("%s.PIP.%s.%s", tile.c_str(), dest_wire.c_str(), source_wire.c_str()) << std::endl;
     }
@@ -227,9 +230,8 @@ struct NexusFasmWriter
         blank();
     }
     // Find the CIBMUX output for a signal
-    WireId find_cibmux(const CellInfo *cell, IdString pin)
+    WireId find_cibmux(WireId cursor)
     {
-        WireId cursor = ctx->getBelPinWire(cell->bel, pin);
         if (cursor == WireId())
             return WireId();
         for (int i = 0; i < 10; i++) {
@@ -248,7 +250,7 @@ struct NexusFasmWriter
     // Write out the mux config for a cell
     void write_cell_muxes(const CellInfo *cell)
     {
-        for (auto port : sorted_cref(cell->ports)) {
+        for (auto &port : cell->ports) {
             // Only relevant to inputs
             if (port.second.type != PORT_IN)
                 continue;
@@ -258,11 +260,11 @@ struct NexusFasmWriter
             if (pin_style & PINOPT_INV) {
                 if (pin_mux == PINMUX_INV || pin_mux == PINMUX_0)
                     write_bit(stringf("%sMUX.INV", ctx->nameOf(port.first)));
-                else if (pin_mux == PINMUX_SIG)
+                else if (pin_mux == PINMUX_SIG && !(pin_style & PINBIT_GATED))
                     write_bit(stringf("%sMUX.%s", ctx->nameOf(port.first), ctx->nameOf(port.first)));
             }
             // Pins that must be explictly enabled
-            if ((pin_style & PINBIT_GATED) && (pin_mux == PINMUX_SIG))
+            if ((pin_style & PINBIT_GATED) && (pin_mux == PINMUX_SIG) && (port.second.net != nullptr))
                 write_bit(stringf("%sMUX.%s", ctx->nameOf(port.first), ctx->nameOf(port.first)));
             // Pins that must be explictly set to 1 rather than just left floating
             if ((pin_style & PINBIT_1) && (pin_mux == PINMUX_1))
@@ -270,7 +272,7 @@ struct NexusFasmWriter
             // Handle CIB muxes - these must be set such that floating pins really are floating to VCC and not connected
             // to another CIB signal
             if ((pin_style & PINBIT_CIBMUX) && port.second.net == nullptr) {
-                WireId cibmuxout = find_cibmux(cell, port.first);
+                WireId cibmuxout = find_cibmux(ctx->getBelPinWire(cell->bel, port.first));
                 if (cibmuxout != WireId()) {
                     write_comment(stringf("CIBMUX for unused pin %s", ctx->nameOf(port.first)));
                     bool found = false;
@@ -287,6 +289,72 @@ struct NexusFasmWriter
         }
     }
 
+    // Handle route-through DCCs
+    void write_dcc_thru()
+    {
+        for (auto bel : ctx->getBels()) {
+            if (ctx->getBelType(bel) != id_DCC)
+                continue;
+            if (!ctx->checkBelAvail(bel))
+                continue;
+            WireId dst = ctx->getBelPinWire(bel, id_CLKO);
+            if (ctx->getBoundWireNet(dst) == nullptr)
+                continue;
+            // Set up the CIBMUX so CE is guaranteed to be tied high
+            WireId ce = ctx->getBelPinWire(bel, id_CE);
+            WireId cibmuxout = find_cibmux(ce);
+            NPNR_ASSERT(cibmuxout != WireId());
+
+            write_comment(stringf("CE CIBMUX for DCC route-thru %s", ctx->nameOfBel(bel)));
+            bool found = false;
+            for (PipId pip : ctx->getPipsUphill(cibmuxout)) {
+                if (ctx->checkPipAvail(pip) && ctx->checkWireAvail(ctx->getPipSrcWire(pip))) {
+                    write_pip(pip);
+                    found = true;
+                    break;
+                }
+            }
+            NPNR_ASSERT(found);
+        }
+    }
+
+    unsigned permute_init(const CellInfo *cell)
+    {
+        unsigned orig_init = int_or_default(cell->params, id_INIT, 0);
+        std::array<std::vector<unsigned>, 4> phys_to_log;
+        const std::array<IdString, 4> ports{id_A, id_B, id_C, id_D};
+        for (unsigned i = 0; i < 4; i++) {
+            WireId pin_wire = ctx->getBelPinWire(cell->bel, ports[i]);
+            for (PipId pip : ctx->getPipsUphill(pin_wire)) {
+                if (!ctx->getBoundPipNet(pip))
+                    continue;
+                const auto &data = ctx->pip_data(pip);
+                if (data.flags & PIP_FIXED_CONN) { // non-permuting
+                    phys_to_log[i].push_back(i);
+                } else { // permuting
+                    NPNR_ASSERT(data.flags & PIP_LUT_PERM);
+                    unsigned from_pin = (data.flags >> 4) & 0xF;
+                    unsigned to_pin = (data.flags >> 0) & 0xF;
+                    NPNR_ASSERT(to_pin == i);
+                    phys_to_log[from_pin].push_back(i);
+                }
+            }
+        }
+        unsigned permuted_init = 0;
+        for (unsigned i = 0; i < 16; i++) {
+            unsigned log_idx = 0;
+            for (unsigned j = 0; j < 4; j++) {
+                if ((i >> j) & 0x1) {
+                    for (auto log_pin : phys_to_log[j])
+                        log_idx |= (1 << log_pin);
+                }
+            }
+            if ((orig_init >> log_idx) & 0x1)
+                permuted_init |= (1 << i);
+        }
+        return permuted_init;
+    }
+
     // Write config for an OXIDE_COMB cell
     void write_comb(const CellInfo *cell)
     {
@@ -297,7 +365,7 @@ struct NexusFasmWriter
         push_tile(bel.tile, id_PLC);
         push(stringf("SLICE%c", slice));
         if (cell->params.count(id_INIT))
-            write_int_vector(stringf("K%d.INIT[15:0]", k), int_or_default(cell->params, id_INIT, 0), 16);
+            write_int_vector(stringf("K%d.INIT[15:0]", k), permute_init(cell), 16);
         if (cell->lutInfo.is_carry) {
             write_bit("MODE.CCU2");
             write_enum(cell, "CCU2.INJECT", "NO");
@@ -336,7 +404,7 @@ struct NexusFasmWriter
         pop(2);
     }
 
-    std::unordered_set<BelId> used_io;
+    pool<BelId> used_io;
 
     struct BankConfig
     {
@@ -354,7 +422,7 @@ struct NexusFasmWriter
         BelId bel = cell->bel;
         used_io.insert(bel);
         push_bel(bel);
-        const NetInfo *t = get_net_or_empty(cell, id_T);
+        const NetInfo *t = cell->getPort(id_T);
         auto tmux = ctx->get_cell_pinmux(cell, id_T);
         bool is_input = false, is_output = false;
         if (tmux == PINMUX_0) {
@@ -366,7 +434,7 @@ struct NexusFasmWriter
         write_bit(stringf("BASE_TYPE.%s_%s", iodir, str_or_default(cell->attrs, id_IO_TYPE, "LVCMOS33").c_str()));
         write_ioattr(cell, "PULLMODE", "NONE");
         write_ioattr(cell, "GLITCHFILTER", "OFF");
-        write_ioattr(cell, "SLEWRATE", "MED");
+        write_ioattr(cell, "SLEWRATE", str_or_default(cell->attrs, id_SLEWRATE, "MED").c_str());
         write_cell_muxes(cell);
         pop();
     }
@@ -377,7 +445,7 @@ struct NexusFasmWriter
         used_io.insert(bel);
         push_bel(bel);
         push("SEIO18");
-        const NetInfo *t = get_net_or_empty(cell, id_T);
+        const NetInfo *t = cell->getPort(id_T);
         auto tmux = ctx->get_cell_pinmux(cell, id_T);
         bool is_input = false, is_output = false;
         if (tmux == PINMUX_0) {
@@ -391,7 +459,7 @@ struct NexusFasmWriter
         const char *iodir = is_input ? "INPUT" : (is_output ? "OUTPUT" : "BIDIR");
         write_bit(stringf("BASE_TYPE.%s_%s", iodir, str_or_default(cell->attrs, id_IO_TYPE, "LVCMOS18H").c_str()));
         write_ioattr(cell, "PULLMODE", "NONE");
-        write_ioattr(cell, "SLEWRATE", "MED");
+        write_ioattr(cell, "SLEWRATE", str_or_default(cell->attrs, id_SLEWRATE, "MED").c_str());
         pop();
         write_cell_muxes(cell);
         pop();
@@ -414,7 +482,7 @@ struct NexusFasmWriter
 
         bank.diff_used = true;
 
-        const NetInfo *t = get_net_or_empty(cell, id_T);
+        const NetInfo *t = cell->getPort(id_T);
         auto tmux = ctx->get_cell_pinmux(cell, id_T);
         bool is_input = false, is_output = false;
         if (tmux == PINMUX_0) {
@@ -454,9 +522,59 @@ struct NexusFasmWriter
         write_enum(cell, "HFDIV_FABRIC_EN", "ENABLED");
         write_enum(cell, "LF_FABRIC_EN");
         write_enum(cell, "LF_OUTPUT_EN");
+        write_enum(cell, "DTR_EN", "ENABLED");
         write_enum(cell, "DEBUG_N", "DISABLED");
-        write_int_vector(stringf("HF_CLK_DIV[7:0]"), ctx->parse_lattice_param(cell, id_HF_CLK_DIV, 8, 0).intval, 8);
+        write_int_vector(stringf("HF_CLK_DIV[7:0]"),
+                         ctx->parse_lattice_param_from_cell(cell, id_HF_CLK_DIV, 8, 0).intval, 8);
+        write_int_vector(stringf("HF_SED_SEC_DIV[7:0]"), 1, 8);
         write_cell_muxes(cell);
+        pop(2);
+    }
+    // Write config for an CONFIG_MULTIBOOT_CORE cell
+    void write_multiboot(const CellInfo *cell)
+    {
+        BelId bel = cell->bel;
+        push_bel(bel);
+        write_enum(cell, "SOURCESEL", "DIS");
+        write_int_vector(stringf("MSPIADDR[31:0]"), ctx->parse_lattice_param_from_cell(cell, id_MSPIADDR, 32, 0).intval,
+                         32);
+        pop();
+    }
+    // Write config for an CONFIG_LMMI_CORE cell
+    void write_lmmi(const CellInfo *cell)
+    {
+        BelId bel = cell->bel;
+        push_bel(bel);
+        write_enum(cell, "LMMI_EN", "DIS");
+        pop();
+    }
+    // Write config for an CONFIG_CLKRST_CORE cell
+    void write_cfg_clkrst(const CellInfo *cell)
+    {
+        BelId bel = cell->bel;
+        push_bel(bel);
+        write_enum(cell, "MCJTAGGSRNDIS", "EN");
+        write_enum(cell, "MCLMMIGSRNDIS", "EN");
+        write_enum(cell, "MCSEDCGSRNDIS", "EN");
+        write_enum(cell, "MCWDTGSRNDIS", "EN");
+        pop();
+    }
+    // Write config for DCC
+    void write_dcc(const CellInfo *cell)
+    {
+        BelId bel = cell->bel;
+        push_bel(bel);
+        write_bit("DCCEN.1"); // Explicit DCC cell implies a clock buffer
+        write_cell_muxes(cell);
+        pop();
+    }
+    // Write config for DCS
+    void write_dcs(const CellInfo *cell)
+    {
+        BelId bel = cell->bel;
+        push_tile(bel.tile, ctx->id("CMUX_0"));
+        push_belname(bel);
+        write_enum(cell, "DCSMODE", "VCC");
         pop(2);
     }
     // Write config for an OXIDE_EBR cell
@@ -507,7 +625,7 @@ struct NexusFasmWriter
         if (wid > 0) {
             push(stringf("IP_EBR_WID%d", wid));
             for (int i = 0; i < 64; i++) {
-                IdString param = ctx->id(stringf("INITVAL_%02X", i));
+                IdString param = ctx->idf("INITVAL_%02X", i);
                 if (!cell->params.count(param))
                     continue;
                 auto &prop = cell->params.at(param);
@@ -532,6 +650,32 @@ struct NexusFasmWriter
         return (key.size() >= 3 && (key.compare(key.size() - 3, 3, "MUX") == 0));
     }
 
+    // Write config for some kind of IOLOGIC cell
+    void write_iol(const CellInfo *cell)
+    {
+        BelId bel = cell->bel;
+        push_bel(bel);
+        write_enum(cell, "MODE");
+        write_enum(cell, "IDDRX1_ODDRX1.OUTPUT");
+        write_enum(cell, "IDDRX1_ODDRX1.TRISTATE");
+        write_enum(cell, "GSR", "DISABLED");
+        write_enum(cell, "TSREG.REGSET", "RESET");
+        if (cell->params.count(ctx->id("DELAY.DEL_VALUE"))) {
+            write_int_vector(stringf("DELAY.DEL_VALUE[6:0]"),
+                             int_or_default(cell->params, ctx->id("DELAY.DEL_VALUE"), 0), 7);
+        }
+        write_enum(cell, "DELAY.COARSE_DELAY");
+        write_enum(cell, "DELAY.COARSE_DELAY_MODE");
+        write_enum(cell, "DELAY.EDGE_MONITOR");
+        write_enum(cell, "DELAY.WAIT_FOR_EDGE");
+        write_enum(cell, "DELAYMUX");
+        write_enum(cell, "INMUX");
+        write_enum(cell, "OUTMUX");
+
+        write_cell_muxes(cell);
+        pop();
+    }
+
     // Write config for some kind of DSP cell
     void write_dsp(const CellInfo *cell)
     {
@@ -539,7 +683,7 @@ struct NexusFasmWriter
         push_bel(bel);
         if (cell->type != id_MULT18_CORE && cell->type != id_MULT18X36_CORE && cell->type != id_MULT36_CORE)
             write_bit(stringf("MODE.%s", ctx->nameOf(cell->type)));
-        for (auto param : sorted_cref(cell->params)) {
+        for (auto &param : cell->params) {
             const std::string &param_name = param.first.str(ctx);
             if (is_mux_param(param_name))
                 continue;
@@ -556,7 +700,7 @@ struct NexusFasmWriter
 
     // Which PLL params are 'word' values
     /* clang-format off */
-    const std::unordered_map<std::string, int> pll_word_params = {
+    const dict<std::string, int> pll_word_params = {
             {"DIVA", 7}, {"DELA", 7}, {"PHIA", 3}, {"DIVB", 7},
             {"DELB", 7}, {"PHIB", 3}, {"DIVC", 7}, {"DELC", 7},
             {"PHIC", 3}, {"DIVD", 7}, {"DELD", 7}, {"PHID", 3},
@@ -581,8 +725,127 @@ struct NexusFasmWriter
             {"V2I_PP_ICTRL", 5},
     };
 
+    const dict<std::string, std::string> pll_default_params = {
+        {"BW_CTL_BIAS", "0b0101"},
+        {"CLKOP_TRIM", "0b0000"},
+        {"CLKOS_TRIM", "0b0000"},
+        {"CLKOS2_TRIM", "0b0000"},
+        {"CLKOS3_TRIM", "0b0000"},
+        {"CLKOS4_TRIM", "0b0000"},
+        {"CLKOS5_TRIM", "0b0000"},
+        {"CRIPPLE", "5P"},
+        {"CSET", "40P"},
+        {"DELAY_CTRL", "200PS"},
+        {"DELA", "0"},
+        {"DELB", "0"},
+        {"DELC", "0"},
+        {"DELD", "0"},
+        {"DELE", "0"},
+        {"DELF", "0"},
+        {"DIRECTION", "DISABLED"},
+        {"DIVA", "0"},
+        {"DIVB", "0"},
+        {"DIVC", "0"},
+        {"DIVD", "0"},
+        {"DIVE", "0"},
+        {"DIVF", "0"},
+        {"DYN_SEL", "0b000"},
+        {"DYN_SOURCE", "STATIC"},
+        {"ENCLK_CLKOP", "DISABLED"},
+        {"ENCLK_CLKOS", "DISABLED"},
+        {"ENCLK_CLKOS2", "DISABLED"},
+        {"ENCLK_CLKOS3", "DISABLED"},
+        {"ENCLK_CLKOS4", "DISABLED"},
+        {"ENCLK_CLKOS5", "DISABLED"},
+        {"ENABLE_SYNC", "DISABLED"},
+        {"FAST_LOCK_EN", "ENABLED"},
+        {"V2I_1V_EN", "DISABLED"},
+        {"FBK_CUR_BLE", "0b00000000"},
+        {"FBK_EDGE_SEL", "POSITIVE"},
+        {"FBK_IF_TIMING_CTL", "0b00"},
+        {"FBK_INTEGER_MODE", "DISABLED"},
+        {"FBK_MASK", "0b00001000"},
+        {"FBK_MMD_DIG", "8"},
+        {"FBK_MMD_PULS_CTL", "0b0000"},
+        {"FBK_MODE", "0b00"},
+        {"FBK_PI_BYPASS", "NOT_BYPASSED"},
+        {"FBK_PI_RC", "0b1100"},
+        {"FBK_PR_CC", "0b0000"},
+        {"FBK_PR_IC", "0b1000"},
+        {"FLOAT_CP", "DISABLED"},
+        {"FLOCK_CTRL", "2X"},
+        {"FLOCK_EN", "ENABLED"},
+        {"FLOCK_SRC_SEL", "REFCLK"},
+        {"FORCE_FILTER", "DISABLED"},
+        {"I_CTRL", "10UA"},
+        {"IPI_CMP", "0b1000"},
+        {"IPI_CMPN", "0b0011"},
+        {"IPI_COMP_EN", "DISABLED"},
+        {"IPP_CTRL", "0b1000"},
+        {"IPP_SEL", "0b1111"},
+        {"KP_VCO", "0b11001"},
+        {"LDT_INT_LOCK_STICKY", "DISABLED"},
+        {"LDT_LOCK", "1536CYC"},
+        {"LDT_LOCK_SEL", "U_FREQ"},
+        {"LEGACY_ATT", "DISABLED"},
+        {"LOAD_REG", "DISABLED"},
+        {"OPENLOOP_EN", "DISABLED"},
+        {"PHIA", "0"},
+        {"PHIB", "0"},
+        {"PHIC", "0"},
+        {"PHID", "0"},
+        {"PHIE", "0"},
+        {"PHIF", "0"},
+        {"PLLPDN_EN", "DISABLED"},
+        {"PLLPD_N", "UNUSED"},
+        {"PLLRESET_ENA", "DISABLED"},
+        {"REF_INTEGER_MODE", "DISABLED"},
+        {"REF_MASK", "0b00000000"},
+        {"REF_MMD_DIG", "8"},
+        {"REF_MMD_IN", "0b00001000"},
+        {"REF_MMD_PULS_CTL", "0b0000"},
+        {"REF_TIMING_CTL", "0b00"},
+        {"REFIN_RESET", "SET"},
+        {"RESET_LF", "DISABLED"},
+        {"ROTATE", "DISABLED"},
+        {"SEL_OUTA", "DISABLED"},
+        {"SEL_OUTB", "DISABLED"},
+        {"SEL_OUTC", "DISABLED"},
+        {"SEL_OUTD", "DISABLED"},
+        {"SEL_OUTE", "DISABLED"},
+        {"SEL_OUTF", "DISABLED"},
+        {"SLEEP", "DISABLED"},
+        {"SSC_DELTA", "0b000000000000000"},
+        {"SSC_DELTA_CTL", "0b00"},
+        {"SSC_DITHER", "DISABLED"},
+        {"SSC_EN_CENTER_IN", "DOWN_TRIANGLE"},
+        {"SSC_EN_SDM", "DISABLED"},
+        {"SSC_EN_SSC", "DISABLED"},
+        {"SSC_F_CODE", "0b000000000000000"},
+        {"SSC_N_CODE", "0b000010100"},
+        {"SSC_ORDER", "SDM_ORDER2"},
+        {"SSC_PI_BYPASS", "NOT_BYPASSED"},
+        {"SSC_REG_WEIGHTING_SEL", "0b000"},
+        {"SSC_SQUARE_MODE", "DISABLED"},
+        {"SSC_STEP_IN", "0b0000000"},
+        {"SSC_TBASE", "0b000000000000"},
+        {"STDBY_ATT", "DISABLED"},
+        {"TRIMOP_BYPASS_N", "BYPASSED"},
+        {"TRIMOS_BYPASS_N", "BYPASSED"},
+        {"TRIMOS2_BYPASS_N", "BYPASSED"},
+        {"TRIMOS3_BYPASS_N", "BYPASSED"},
+        {"TRIMOS4_BYPASS_N", "BYPASSED"},
+        {"TRIMOS5_BYPASS_N", "BYPASSED"},
+        {"V2I_KVCO_SEL", "85"},
+        {"V2I_PP_ICTRL", "0b00110"},
+        {"V2I_PP_RES", "10K"},
+        {"CLKMUX_FB", "CMUX_CLKOP"},
+        {"SEL_FBK", "DIVA"},
+        {"DIV_DEL", "0b0000001"},
+    };
+
     // Which MIPI params are 'word' values
-    const std::unordered_map<std::string, int> dphy_word_params = {
+    const dict<std::string, int> dphy_word_params = {
             {"CM", 8}, {"CN", 5}, {"CO", 3}, {"RSEL", 2}, {"RXCDRP", 2},
             {"RXDATAWIDTHHS", 2}, {"RXLPRP", 3}, {"TEST_ENBL", 6},
             {"TEST_PATTERN", 32}, {"TST", 4}, {"TXDATAWIDTHHS", 2},
@@ -590,6 +853,15 @@ struct NexusFasmWriter
             {"U_PRG_HS_TRAIL", 6}, {"U_PRG_HS_ZERO", 6}, {"U_PRG_RXHS_SETTLE", 6}
     };
     /* clang-format on */
+
+    static bool is_number(std::string s)
+    {
+        for (auto c : s) {
+            if (!isdigit(c))
+                return false;
+        }
+        return true;
+    }
 
     // Write out config for some kind of PLL cell
     void write_pll(const CellInfo *cell)
@@ -601,17 +873,32 @@ struct NexusFasmWriter
         write_cell_muxes(cell);
         pop();
         push(stringf("IP_%s", ctx->nameOf(IdString(ctx->bel_data(bel).name))));
-        for (auto param : sorted_cref(cell->params)) {
-            const std::string &name = param.first.str(ctx);
+        for (auto &value : pll_default_params) {
+            IdString n = IdString(ctx, value.first);
+            Property temp;
+            if (is_number(value.second))
+                temp = Property(std::stoi(value.second), 32);
+            else
+                temp = Property::from_string(value.second);
+            const std::string &name = n.str(ctx);
             if (is_mux_param(name) || name == "CLKMUX_FB" || name == "SEL_FBK")
                 continue;
             auto fnd_word = pll_word_params.find(name);
             if (fnd_word != pll_word_params.end()) {
-                write_int_vector(stringf("%s[%d:0]", name.c_str(), fnd_word->second - 1),
-                                 ctx->parse_lattice_param(cell, param.first, fnd_word->second, 0).as_int64(),
-                                 fnd_word->second);
+                if (cell->params.count(n)) {
+                    write_int_vector(stringf("%s[%d:0]", name.c_str(), fnd_word->second - 1),
+                                     ctx->parse_lattice_param_from_cell(cell, n, fnd_word->second, 0).as_int64(),
+                                     fnd_word->second);
+                } else {
+                    write_int_vector(stringf("%s[%d:0]", name.c_str(), fnd_word->second - 1),
+                                     ctx->parse_lattice_param(temp, n, fnd_word->second).as_int64(), fnd_word->second);
+                }
             } else {
-                write_bit(stringf("%s.%s", name.c_str(), param.second.as_string().c_str()));
+                if (cell->params.count(n)) {
+                    write_bit(stringf("%s.%s", name.c_str(), cell->params.at(n).as_string().c_str()));
+                } else {
+                    write_bit(stringf("%s.%s", name.c_str(), temp.as_string().c_str()));
+                }
             }
         }
         pop();
@@ -622,14 +909,14 @@ struct NexusFasmWriter
     {
         BelId bel = cell->bel;
         push(stringf("IP_%s", ctx->nameOf(IdString(ctx->bel_data(bel).name))));
-        for (auto param : sorted_cref(cell->params)) {
+        for (auto &param : cell->params) {
             const std::string &name = param.first.str(ctx);
             if (is_mux_param(name) || name == "GSR")
                 continue;
             auto fnd_word = dphy_word_params.find(name);
             if (fnd_word != dphy_word_params.end()) {
                 write_int_vector(stringf("%s[%d:0]", name.c_str(), fnd_word->second - 1),
-                                 ctx->parse_lattice_param(cell, param.first, fnd_word->second, 0).as_int64(),
+                                 ctx->parse_lattice_param_from_cell(cell, param.first, fnd_word->second, 0).as_int64(),
                                  fnd_word->second);
             } else {
                 write_bit(stringf("%s.%s", name.c_str(), param.second.as_string().c_str()));
@@ -657,9 +944,11 @@ struct NexusFasmWriter
         blank();
 
         Loc l = ctx->getBelLocation(bel);
+        if (is_lifcl_17 && l.x == 0)
+            l.x = 1;
         push(stringf("IP_LRAM_CORE_R%dC%d", l.y, l.x));
         for (int i = 0; i < 128; i++) {
-            IdString param = ctx->id(stringf("INITVAL_%02X", i));
+            IdString param = ctx->idf("INITVAL_%02X", i);
             if (!cell->params.count(param))
                 continue;
             auto &prop = cell->params.at(param);
@@ -683,7 +972,7 @@ struct NexusFasmWriter
         write_comment("# Unused bels");
 
         // DSP primitives are configured to a default mode; even if unused
-        static const std::unordered_map<IdString, std::vector<std::string>> dsp_defconf = {
+        static const dict<IdString, std::vector<std::string>> dsp_defconf = {
                 {id_MULT9_CORE,
                  {
                          "GSR.ENABLED",
@@ -733,7 +1022,7 @@ struct NexusFasmWriter
             }
         }
     }
-    std::unordered_map<int, int> bank_vcco;
+    dict<int, int> bank_vcco;
     // bank VccO in mV
     int get_bank_vcco(const std::string &iostd)
     {
@@ -753,14 +1042,14 @@ struct NexusFasmWriter
     // Write out placeholder bankref config
     void write_bankcfg()
     {
-        for (auto c : sorted(ctx->cells)) {
-            const CellInfo *ci = c.second;
+        for (auto &c : ctx->cells) {
+            const CellInfo *ci = c.second.get();
             if (ci->type != id_SEIO33_CORE)
                 continue;
             if (!ci->attrs.count(id_IO_TYPE))
                 continue;
             // VccO only concerns outputs
-            const NetInfo *t = get_net_or_empty(ci, id_T);
+            const NetInfo *t = ci->getPort(id_T);
             auto tmux = ctx->get_cell_pinmux(ci, id_T);
             if (tmux == PINMUX_1 || (tmux != PINMUX_0 && t == nullptr))
                 continue;
@@ -809,12 +1098,12 @@ struct NexusFasmWriter
         write_attribute("oxide.device_variant", ctx->variant);
         blank();
         // Write routing
-        for (auto n : sorted(ctx->nets)) {
-            write_net(n.second);
+        for (auto &n : ctx->nets) {
+            write_net(n.second.get());
         }
         // Write cell config
-        for (auto c : sorted(ctx->cells)) {
-            const CellInfo *ci = c.second;
+        for (auto &c : ctx->cells) {
+            const CellInfo *ci = c.second.get();
             write_comment(stringf("# Cell %s", ctx->nameOf(ci)));
             if (ci->type == id_OXIDE_COMB)
                 write_comb(ci);
@@ -832,9 +1121,8 @@ struct NexusFasmWriter
                 write_osc(ci);
             else if (ci->type == id_OXIDE_EBR)
                 write_bram(ci);
-            else if (ci->type == id_MULT9_CORE || ci->type == id_PREADD9_CORE || ci->type == id_MULT18_CORE ||
-                     ci->type == id_MULT18X36_CORE || ci->type == id_MULT36_CORE || ci->type == id_REG18_CORE ||
-                     ci->type == id_ACC54_CORE)
+            else if (ci->type.in(id_MULT9_CORE, id_PREADD9_CORE, id_MULT18_CORE, id_MULT18X36_CORE, id_MULT36_CORE,
+                                 id_REG18_CORE, id_ACC54_CORE))
                 write_dsp(ci);
             else if (ci->type == id_PLL_CORE)
                 write_pll(ci);
@@ -842,8 +1130,22 @@ struct NexusFasmWriter
                 write_lram(ci);
             else if (ci->type == id_DPHY_CORE)
                 write_dphy(ci);
+            else if (ci->type.in(id_IOLOGIC, id_SIOLOGIC))
+                write_iol(ci);
+            else if (ci->type == id_DCC)
+                write_dcc(ci);
+            else if (ci->type == id_DCS)
+                write_dcs(ci);
+            else if (ci->type == id_CONFIG_MULTIBOOT_CORE)
+                write_multiboot(ci);
+            else if (ci->type == id_CONFIG_LMMI_CORE)
+                write_lmmi(ci);
+            else if (ci->type == id_CONFIG_CLKRST_CORE)
+                write_cfg_clkrst(ci);
             blank();
         }
+        // Handle DCC route-throughs
+        write_dcc_thru();
         // Write config for unused bels
         write_unused();
         // Write bank config

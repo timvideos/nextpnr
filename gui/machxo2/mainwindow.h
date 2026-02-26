@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -35,13 +35,19 @@ class MainWindow : public BaseMainWindow
   public:
     void createMenu();
 
+  protected:
     void onDisableActions() override;
     void onUpdateActions() override;
 
   protected Q_SLOTS:
     void new_proj() override;
-
     void newContext(Context *ctx);
+    void open_lpf();
+    void save_config();
+
+  private:
+    QAction *actionLoadLPF;
+    QAction *actionSaveConfig;
 };
 
 NEXTPNR_NAMESPACE_END

@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -24,7 +24,7 @@ NEXTPNR_NAMESPACE_BEGIN
 
 namespace {
 
-static const std::unordered_map<IdString, Arch::CellPinsData> base_cell_pin_data = {
+static const dict<IdString, Arch::CellPinsData> base_cell_pin_data = {
         {id_OXIDE_COMB,
          {
                  {id_WCK, PINSTYLE_DEDI},
@@ -215,7 +215,50 @@ static const std::unordered_map<IdString, Arch::CellPinsData> base_cell_pin_data
                  {id_U3END3, PINSTYLE_PD_NONCIB},
                  {id_UED0THEN, PINSTYLE_PD_NONCIB},
                  {{}, PINSTYLE_CIB},
-         }}};
+         }},
+        {id_SIOLOGIC,
+         {
+                 {id_SCLKIN, PINSTYLE_IOL_CLK},
+                 {id_SCLKOUT, PINSTYLE_IOL_CLK},
+                 {id_LSRIN, PINSTYLE_IOL_CELSR},
+                 {id_LSROUT, PINSTYLE_IOL_CELSR},
+                 {id_CEIN, PINSTYLE_IOL_CELSR},
+                 {id_CEOUT, PINSTYLE_IOL_CELSR},
+                 {id_TXDATA0, PINSTYLE_CIB},
+                 {id_TXDATA1, PINSTYLE_CIB},
+                 {id_TSDATA0, PINSTYLE_CIB},
+
+         }},
+        {id_IOLOGIC,
+         {
+                 {id_SCLKIN, PINSTYLE_IOL_CLK},
+                 {id_SCLKOUT, PINSTYLE_IOL_CLK},
+                 {id_LSRIN, PINSTYLE_IOL_CELSR},
+                 {id_LSROUT, PINSTYLE_IOL_CELSR},
+                 {id_CEIN, PINSTYLE_IOL_CELSR},
+                 {id_CEOUT, PINSTYLE_IOL_CELSR},
+                 {id_TXDATA0, PINSTYLE_CIB},
+                 {id_TXDATA1, PINSTYLE_CIB},
+                 {id_TSDATA0, PINSTYLE_CIB},
+         }},
+        {id_CONFIG_MULTIBOOT_CORE,
+         {
+                 {{}, PINSTYLE_CIB},
+         }},
+        {id_CONFIG_LMMI_CORE,
+         {
+                 {id_LMMICLK, PINSTYLE_DEDI},
+                 {id_LMMIRESETN, PINSTYLE_DEDI},
+                 {id_RSTSMCLK, PINSTYLE_DEDI},
+                 {id_SMCLK, PINSTYLE_DEDI},
+                 {{}, PINSTYLE_CIB},
+         }},
+        {id_CONFIG_CLKRST_CORE,
+         {
+                 {{}, PINSTYLE_DEDI},
+         }},
+
+};
 } // namespace
 
 void Arch::init_cell_pin_data() { cell_pins_db = base_cell_pin_data; }

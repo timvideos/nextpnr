@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -34,6 +34,12 @@
 #include "fpgaviewwidget.h"
 #include "log.h"
 #include "mainwindow.h"
+
+#if QT_VERSION_MAJOR >= 6
+#define EVENT_POS(event) ((event)->position())
+#else
+#define EVENT_POS(event) ((event)->pos())
+#endif
 
 NEXTPNR_NAMESPACE_BEGIN
 
@@ -128,40 +134,47 @@ float FPGAViewWidget::PickedElement::distance(Context *ctx, float wx, float wy) 
 
     // Go over its' GraphicElements, and calculate the distance to them.
     std::vector<float> distances;
-    std::transform(graphics.begin(), graphics.end(), std::back_inserter(distances),
-                   [&](const GraphicElement &ge) -> float {
-                       switch (ge.type) {
-                       case GraphicElement::TYPE_BOX: {
-                           // If outside the box, return unit distance to closest border.
-                           float outside_x = -1, outside_y = -1;
-                           if (dx < ge.x1 || dx > ge.x2) {
-                               outside_x = std::min(std::abs(dx - ge.x1), std::abs(dx - ge.x2));
-                           }
-                           if (dy < ge.y1 || dy > ge.y2) {
-                               outside_y = std::min(std::abs(dy - ge.y1), std::abs(dy - ge.y2));
-                           }
-                           if (outside_x != -1 && outside_y != -1)
-                               return std::min(outside_x, outside_y);
+    std::transform(
+            graphics.begin(), graphics.end(), std::back_inserter(distances), [&](const GraphicElement &ge) -> float {
+                switch (ge.type) {
+                case GraphicElement::TYPE_BOX: {
+                    // If outside the box, return unit distance to closest border.
+                    float outside_x = -1, outside_y = -1;
+                    if (dx < ge.x1 || dx > ge.x2) {
+                        outside_x = std::min(std::abs(dx - ge.x1), std::abs(dx - ge.x2));
+                    }
+                    if (dy < ge.y1 || dy > ge.y2) {
+                        outside_y = std::min(std::abs(dy - ge.y1), std::abs(dy - ge.y2));
+                    }
+                    if (outside_x != -1 && outside_y != -1)
+                        return std::min(outside_x, outside_y);
 
-                           // If in box, return 0.
-                           return 0;
-                       }
-                       case GraphicElement::TYPE_LINE:
-                       case GraphicElement::TYPE_ARROW: {
-                           // Return somewhat primitively calculated distance to segment.
-                           // TODO(q3k): consider coming up with a better algorithm
-                           QVector2D w(wx, wy);
-                           QVector2D a(ge.x1, ge.y1);
-                           QVector2D b(ge.x2, ge.y2);
-                           float dw = a.distanceToPoint(w) + b.distanceToPoint(w);
-                           float dab = a.distanceToPoint(b);
-                           return std::abs(dw - dab) / dab;
-                       }
-                       default:
-                           // Not close to anything.
-                           return -1;
-                       }
-                   });
+                    // If in box, return 0.
+                    return 0;
+                }
+                case GraphicElement::TYPE_LOCAL_LINE:
+                case GraphicElement::TYPE_LOCAL_ARROW:
+                case GraphicElement::TYPE_LINE:
+                case GraphicElement::TYPE_ARROW: {
+                    // Return somewhat primitively calculated distance to segment.
+                    // TODO(q3k): consider coming up with a better algorithm
+                    QVector2D w;
+                    if (ge.type == GraphicElement::TYPE_LOCAL_LINE || ge.type == GraphicElement::TYPE_LOCAL_ARROW) {
+                        w = QVector2D(dx, dy);
+                    } else {
+                        w = QVector2D(wx, wy);
+                    }
+                    QVector2D a(ge.x1, ge.y1);
+                    QVector2D b(ge.x2, ge.y2);
+                    float dw = a.distanceToPoint(w) + b.distanceToPoint(w);
+                    float dab = a.distanceToPoint(b);
+                    return std::abs(dw - dab) / dab;
+                }
+                default:
+                    // Not close to anything.
+                    return -1;
+                }
+            });
 
     // Find smallest non -1 distance.
     // Find closest element.
@@ -192,7 +205,8 @@ void FPGAViewWidget::renderGraphicElement(LineShaderData &out, PickQuadTree::Bou
         return;
     }
 
-    if (el.type == GraphicElement::TYPE_LINE || el.type == GraphicElement::TYPE_ARROW) {
+    if (el.type == GraphicElement::TYPE_LINE || el.type == GraphicElement::TYPE_ARROW ||
+        el.type == GraphicElement::TYPE_LOCAL_LINE || el.type == GraphicElement::TYPE_LOCAL_ARROW) {
         PolyLine(x + el.x1, y + el.y1, x + el.x2, y + el.y2).build(out);
         bb.setX0(std::min(bb.x0(), x + el.x1));
         bb.setY0(std::min(bb.y0(), y + el.y1));
@@ -250,7 +264,8 @@ void FPGAViewWidget::populateQuadTree(RendererData *data, const DecalXY &decal, 
             res = data->qt->insert(PickQuadTree::BoundingBox(x + el.x1, y + el.y1, x + el.x2, y + el.y2), element);
         }
 
-        if (el.type == GraphicElement::TYPE_LINE || el.type == GraphicElement::TYPE_ARROW) {
+        if (el.type == GraphicElement::TYPE_LINE || el.type == GraphicElement::TYPE_ARROW ||
+            el.type == GraphicElement::TYPE_LOCAL_LINE || el.type == GraphicElement::TYPE_LOCAL_ARROW) {
             // Lines are bounded by their AABB slightly enlarged.
             float x0 = x + el.x1;
             float y0 = y + el.y1;
@@ -287,7 +302,11 @@ QMatrix4x4 FPGAViewWidget::getProjection(void)
 void FPGAViewWidget::paintGL()
 {
     auto gl = QOpenGLContext::currentContext()->functions();
+#if defined(__APPLE__)
     const qreal retinaScale = devicePixelRatio();
+#else
+    const qreal retinaScale = devicePixelRatioF();
+#endif
     gl->glViewport(0, 0, width() * retinaScale, height() * retinaScale);
     gl->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -535,7 +554,7 @@ void FPGAViewWidget::renderLines(void)
             QMutexLocker lock(&rendererDataLock_);
 
             // If we're not re-rendering any highlights/selections, let's
-            // copy them over from teh current object.
+            // copy them over from the current object.
             data->gfxGrid = rendererData_->gfxGrid;
             if (!highlightedOrSelectedChanged) {
                 data->gfxSelected = rendererData_->gfxSelected;
@@ -558,6 +577,10 @@ void FPGAViewWidget::renderLines(void)
         for (float i = 0.0f; i < 1.0f * ctx_->getGridDimY() + 1; i += 1.0f) {
             PolyLine(0.0f, i, 1.0f * ctx_->getGridDimX(), i).build(rendererData_->gfxGrid);
         }
+        rendererData_->bbGlobal.setX0(-1.0f);
+        rendererData_->bbGlobal.setY0(-1.0f);
+        rendererData_->bbGlobal.setX1(1.0f * (ctx_->getGridDimX() + 1));
+        rendererData_->bbGlobal.setY1(1.0f * (ctx_->getGridDimY() + 1));
         rendererData_->gfxGrid.last_render++;
     }
     if (highlightedOrSelectedChanged) {
@@ -703,14 +726,14 @@ void FPGAViewWidget::mousePressEvent(QMouseEvent *event)
     bool shift = QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
     bool ctrl = QApplication::keyboardModifiers().testFlag(Qt::ControlModifier);
     bool btn_right = event->buttons() & Qt::RightButton;
-    bool btn_mid = event->buttons() & Qt::MidButton;
+    bool btn_mid = event->buttons() & Qt::MiddleButton;
     bool btn_left = event->buttons() & Qt::LeftButton;
 
     if (btn_right || btn_mid || (btn_left && shift)) {
         lastDragPos_ = event->pos();
     }
     if (btn_left && !shift) {
-        auto world = mouseToWorldCoordinates(event->x(), event->y());
+        auto world = mouseToWorldCoordinates(EVENT_POS(event).x(), EVENT_POS(event).y());
         auto closestOr = pickElement(world.x(), world.y());
         if (!closestOr) {
             // If we clicked on empty space and aren't holding down ctrl,
@@ -743,12 +766,12 @@ void FPGAViewWidget::mouseMoveEvent(QMouseEvent *event)
 
     bool shift = QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
     bool btn_right = event->buttons() & Qt::RightButton;
-    bool btn_mid = event->buttons() & Qt::MidButton;
+    bool btn_mid = event->buttons() & Qt::MiddleButton;
     bool btn_left = event->buttons() & Qt::LeftButton;
 
     if (btn_right || btn_mid || (btn_left && shift)) {
-        const int dx = event->x() - lastDragPos_.x();
-        const int dy = event->y() - lastDragPos_.y();
+        const int dx = EVENT_POS(event).x() - lastDragPos_.x();
+        const int dy = EVENT_POS(event).y() - lastDragPos_.y();
         lastDragPos_ = event->pos();
 
         auto world = mouseToWorldDimensions(dx, dy);
@@ -758,7 +781,7 @@ void FPGAViewWidget::mouseMoveEvent(QMouseEvent *event)
         return;
     }
 
-    auto world = mouseToWorldCoordinates(event->x(), event->y());
+    auto world = mouseToWorldCoordinates(EVENT_POS(event).x(), EVENT_POS(event).y());
     auto closestOr = pickElement(world.x(), world.y());
     // No elements? No decal.
     if (!closestOr) {
@@ -776,8 +799,8 @@ void FPGAViewWidget::mouseMoveEvent(QMouseEvent *event)
         QMutexLocker locked(&rendererArgsLock_);
         rendererArgs_->hoveredDecal = closest.decal(ctx_);
         rendererArgs_->changed = true;
-        rendererArgs_->x = event->x();
-        rendererArgs_->y = event->y();
+        rendererArgs_->x = EVENT_POS(event).x();
+        rendererArgs_->y = EVENT_POS(event).y();
         if (closest.type == ElementType::BEL) {
             rendererArgs_->hintText = std::string("BEL\n") + ctx_->getBelName(closest.bel).str(ctx_);
             CellInfo *cell = ctx_->getBoundBelCell(closest.bel);
@@ -807,12 +830,10 @@ void FPGAViewWidget::mouseMoveEvent(QMouseEvent *event)
 // coordinates.
 QVector4D FPGAViewWidget::mouseToWorldCoordinates(int x, int y)
 {
-    const qreal retinaScale = devicePixelRatio();
-
     auto projection = getProjection();
 
     QMatrix4x4 vp;
-    vp.viewport(0, 0, width() * retinaScale, height() * retinaScale);
+    vp.viewport(0, 0, width(), height());
 
     QVector4D vec(x, y, 1, 1);
     vec = vp.inverted() * vec;

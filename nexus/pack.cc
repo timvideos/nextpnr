@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -25,6 +25,7 @@
 
 #include <boost/algorithm/string.hpp>
 #include <queue>
+#include <set>
 
 NEXTPNR_NAMESPACE_BEGIN
 
@@ -32,14 +33,18 @@ namespace {
 bool is_enabled(CellInfo *ci, IdString prop) { return str_or_default(ci->params, prop, "") == "ENABLED"; }
 } // namespace
 
-// Parse a possibly-Lattice-style (C literal in Verilog string) style parameter
-Property Arch::parse_lattice_param(const CellInfo *ci, IdString prop, int width, int64_t defval) const
+Property Arch::parse_lattice_param_from_cell(const CellInfo *ci, IdString prop, int width, int64_t defval) const
 {
     auto fnd = ci->params.find(prop);
     if (fnd == ci->params.end())
         return Property(defval, width);
-    const auto &val = fnd->second;
-    if (val.is_string) {
+    return this->parse_lattice_param(fnd->second, prop, width, nameOf(ci));
+}
+
+// Parse a possibly-Lattice-style (C literal in Verilog string) style parameter
+Property Arch::parse_lattice_param(const Property &val, IdString prop, int width, const char *ci) const
+{
+    if (val.is_string && !prop.in(id_CSDECODE_A, id_CSDECODE_B, id_CSDECODE_R, id_CSDECODE_W)) {
         const std::string &s = val.str;
         Property temp;
 
@@ -47,7 +52,7 @@ Property Arch::parse_lattice_param(const CellInfo *ci, IdString prop, int width,
             for (int i = int(s.length()) - 1; i >= 2; i--) {
                 char c = s.at(i);
                 if (c != '0' && c != '1' && c != 'x')
-                    log_error("Invalid binary digit '%c' in property %s.%s\n", c, nameOf(ci), nameOf(prop));
+                    log_error("Invalid binary digit '%c' in property %s.%s\n", c, ci, nameOf(prop));
                 temp.str.push_back(c);
             }
         } else if (boost::starts_with(s, "0x")) {
@@ -61,7 +66,7 @@ Property Arch::parse_lattice_param(const CellInfo *ci, IdString prop, int width,
                 else if (c >= 'A' && c <= 'F')
                     nibble = (c - 'A') + 10;
                 else
-                    log_error("Invalid hex digit '%c' in property %s.%s\n", c, nameOf(ci), nameOf(prop));
+                    log_error("Invalid hex digit '%c' in property %s.%s\n", c, ci, nameOf(prop));
                 for (int j = 0; j < 4; j++)
                     temp.str.push_back(((nibble >> j) & 0x1) ? Property::S1 : Property::S0);
             }
@@ -73,24 +78,27 @@ Property Arch::parse_lattice_param(const CellInfo *ci, IdString prop, int width,
                 else
                     ival = std::stoll(s);
             } catch (std::runtime_error &e) {
-                log_error("Invalid decimal value for property %s.%s", nameOf(ci), nameOf(prop));
+                log_error("Invalid decimal value for property %s.%s", ci, nameOf(prop));
             }
             temp = Property(ival);
         }
-
-        for (auto b : temp.str.substr(width)) {
-            if (b == Property::S1)
-                log_error("Found value for property %s.%s with width greater than %d\n", nameOf(ci), nameOf(prop),
-                          width);
+        if (int(temp.size()) > width) {
+            for (auto b : temp.str.substr(width)) {
+                if (b == Property::S1)
+                    log_error("Found value for property %s.%s with width greater than %d\n", ci, nameOf(prop), width);
+            }
         }
         temp.update_intval();
         return temp.extract(0, width);
     } else {
-        for (auto b : val.str.substr(width)) {
-            if (b == Property::S1)
-                log_error("Found bitvector value for property %s.%s with width greater than %d - perhaps a string was "
-                          "converted to bits?\n",
-                          nameOf(ci), nameOf(prop), width);
+        if (int(val.str.size()) > width) {
+            for (auto b : val.str.substr(width)) {
+                if (b == Property::S1)
+                    log_error("Found bitvector value for property %s.%s with width greater than %d - perhaps a string "
+                              "was "
+                              "converted to bits?\n",
+                              ci, nameOf(prop), width);
+            }
         }
         return val.extract(0, width);
     }
@@ -106,16 +114,16 @@ struct NexusPacker
     struct XFormRule
     {
         IdString new_type;
-        std::unordered_map<IdString, IdString> port_xform;
-        std::unordered_map<IdString, std::vector<IdString>> port_multixform;
-        std::unordered_map<IdString, IdString> param_xform;
+        dict<IdString, IdString> port_xform;
+        dict<IdString, std::vector<IdString>> port_multixform;
+        dict<IdString, IdString> param_xform;
         std::vector<std::pair<IdString, std::string>> set_attrs;
         std::vector<std::pair<IdString, Property>> set_params;
         std::vector<std::pair<IdString, Property>> default_params;
         std::vector<std::tuple<IdString, IdString, int, int64_t>> parse_params;
     };
 
-    void xform_cell(const std::unordered_map<IdString, XFormRule> &rules, CellInfo *ci)
+    void xform_cell(const dict<IdString, XFormRule> &rules, CellInfo *ci)
     {
         auto &rule = rules.at(ci->type);
         ci->type = rule.new_type;
@@ -126,12 +134,12 @@ struct NexusPacker
         for (auto pname : orig_port_names) {
             if (rule.port_multixform.count(pname)) {
                 auto old_port = ci->ports.at(pname);
-                disconnect_port(ctx, ci, pname);
+                ci->disconnectPort(pname);
                 ci->ports.erase(pname);
                 for (auto new_name : rule.port_multixform.at(pname)) {
                     ci->ports[new_name].name = new_name;
                     ci->ports[new_name].type = old_port.type;
-                    connect_port(ctx, old_port.net, ci, new_name);
+                    ci->connectPort(new_name, old_port.net);
                 }
             } else {
                 IdString new_name;
@@ -145,7 +153,7 @@ struct NexusPacker
                     new_name = ctx->id(stripped_name);
                 }
                 if (new_name != pname) {
-                    rename_port(ctx, ci, pname, new_name);
+                    ci->renamePort(pname, new_name);
                 }
             }
         }
@@ -170,7 +178,7 @@ struct NexusPacker
             int64_t def;
             for (const auto &p : rule.parse_params) {
                 std::tie(old_param, new_param, width, def) = p;
-                ci->params[new_param] = ctx->parse_lattice_param(ci, old_param, width, def);
+                ci->params[new_param] = ctx->parse_lattice_param_from_cell(ci, old_param, width, def);
             }
         }
 
@@ -178,12 +186,12 @@ struct NexusPacker
             ci->params[param.first] = param.second;
     }
 
-    void generic_xform(const std::unordered_map<IdString, XFormRule> &rules, bool print_summary = false)
+    void generic_xform(const dict<IdString, XFormRule> &rules, bool print_summary = false)
     {
         std::map<std::string, int> cell_count;
         std::map<std::string, int> new_types;
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (rules.count(ci->type)) {
                 cell_count[ci->type.str(ctx)]++;
                 xform_cell(rules, ci);
@@ -205,7 +213,7 @@ struct NexusPacker
     void pack_luts()
     {
         log_info("Packing LUTs...\n");
-        std::unordered_map<IdString, XFormRule> lut_rules;
+        dict<IdString, XFormRule> lut_rules;
         lut_rules[id_LUT4].new_type = id_OXIDE_COMB;
         lut_rules[id_LUT4].port_xform[id_Z] = id_F;
         lut_rules[id_LUT4].parse_params.emplace_back(id_INIT, id_INIT, 16, 0);
@@ -229,7 +237,7 @@ struct NexusPacker
     void pack_ffs()
     {
         log_info("Packing FFs...\n");
-        std::unordered_map<IdString, XFormRule> ff_rules;
+        dict<IdString, XFormRule> ff_rules;
         for (auto type : {id_FD1P3BX, id_FD1P3DX, id_FD1P3IX, id_FD1P3JX}) {
             ff_rules[type].new_type = id_OXIDE_FF;
             ff_rules[type].port_xform[id_CK] = id_CLK;
@@ -262,7 +270,7 @@ struct NexusPacker
         generic_xform(ff_rules, true);
     }
 
-    std::unordered_map<IdString, BelId> reference_bels;
+    dict<IdString, BelId> reference_bels;
 
     void autocreate_ports(CellInfo *cell)
     {
@@ -303,26 +311,28 @@ struct NexusPacker
     {
         // Gets a constant net, given the driver type (VHI or VLO)
         // If one doesn't exist already; then create it
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (ci->type != type)
                 continue;
-            NetInfo *z = get_net_or_empty(ci, id_Z);
+            NetInfo *z = ci->getPort(id_Z);
             if (z == nullptr)
                 continue;
             return z;
         }
 
-        NetInfo *new_net = ctx->createNet(ctx->id(stringf("$CONST_%s_NET_", type.c_str(ctx))));
-        CellInfo *new_cell = ctx->createCell(ctx->id(stringf("$CONST_%s_DRV_", type.c_str(ctx))), type);
+        NetInfo *new_net = ctx->createNet(ctx->idf("$CONST_%s_NET_", type.c_str(ctx)));
+        CellInfo *new_cell = ctx->createCell(ctx->idf("$CONST_%s_DRV_", type.c_str(ctx)), type);
         new_cell->addOutput(id_Z);
-        connect_port(ctx, new_net, new_cell, id_Z);
+        new_cell->connectPort(id_Z, new_net);
+        if (type == id_VCC_DRV)
+            new_net->constant_value = id_VCC_DRV;
         return new_net;
     }
 
     CellPinMux get_pin_needed_muxval(CellInfo *cell, IdString port)
     {
-        NetInfo *net = get_net_or_empty(cell, port);
+        NetInfo *net = cell->getPort(port);
         if (net == nullptr || net->driver.cell == nullptr) {
             // Pin is disconnected
             // If a mux value exists already, honour it
@@ -353,14 +363,14 @@ struct NexusPacker
     void uninvert_port(CellInfo *cell, IdString port)
     {
         // Rewire a port so it is driven by the input to an inverter
-        NetInfo *net = get_net_or_empty(cell, port);
+        NetInfo *net = cell->getPort(port);
         NPNR_ASSERT(net != nullptr && net->driver.cell != nullptr && net->driver.cell->type == id_INV);
         CellInfo *inv = net->driver.cell;
-        disconnect_port(ctx, cell, port);
+        cell->disconnectPort(port);
 
-        NetInfo *inv_a = get_net_or_empty(inv, id_A);
+        NetInfo *inv_a = inv->getPort(id_A);
         if (inv_a != nullptr) {
-            connect_port(ctx, inv_a, cell, port);
+            cell->connectPort(port, inv_a);
         }
     }
 
@@ -369,11 +379,11 @@ struct NexusPacker
         // Remove unused inverters and high/low drivers
         std::vector<IdString> trim_cells;
         std::vector<IdString> trim_nets;
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (ci->type != id_INV && ci->type != id_VLO && ci->type != id_VHI && ci->type != id_VCC_DRV)
                 continue;
-            NetInfo *z = get_net_or_empty(ci, id_Z);
+            NetInfo *z = ci->getPort(id_Z);
             if (z == nullptr) {
                 trim_cells.push_back(ci->name);
                 continue;
@@ -381,7 +391,7 @@ struct NexusPacker
             if (!z->users.empty())
                 continue;
 
-            disconnect_port(ctx, ci, id_A);
+            ci->disconnectPort(id_A);
 
             trim_cells.push_back(ci->name);
             trim_nets.push_back(z->name);
@@ -415,7 +425,7 @@ struct NexusPacker
         for (IdString port : port_names) {
             IdString new_name = ctx->id(remove_brackets(port.str(ctx)));
             if (new_name != port)
-                rename_port(ctx, cell, port, new_name);
+                cell->renamePort(port, new_name);
         }
     }
 
@@ -453,17 +463,17 @@ struct NexusPacker
 
                     if ((cell->type == id_OXIDE_COMB) && (req_mux == PINMUX_1)) {
                         // We need to add a connection to the dedicated Vcc resource that can feed these cell ports
-                        disconnect_port(ctx, cell, port_name);
-                        connect_port(ctx, dedi_vcc_net, cell, port_name);
+                        cell->disconnectPort(port_name);
+                        cell->connectPort(port_name, dedi_vcc_net);
                         continue;
                     }
 
-                    disconnect_port(ctx, cell, port_name);
+                    cell->disconnectPort(port_name);
                     ctx->set_cell_pinmux(cell, port_name, req_mux);
                 } else if (port.second.net == nullptr) {
                     // If the port is disconnected; and there is no hard constant
                     // then we need to connect it to the relevant soft-constant net
-                    connect_port(ctx, (req_mux == PINMUX_1) ? vcc_net : gnd_net, cell, port_name);
+                    cell->connectPort(port_name, (req_mux == PINMUX_1) ? vcc_net : gnd_net);
                 }
             }
         }
@@ -474,7 +484,7 @@ struct NexusPacker
         // Find the actual IO buffer corresponding to a port; and copy attributes across to it
         // Note that this relies on Yosys to do IO buffer inference, to match vendor tooling behaviour
         // In all cases the nextpnr-inserted IO buffers are removed as redundant.
-        for (auto &port : sorted_ref(ctx->ports)) {
+        for (auto &port : ctx->ports) {
             if (!ctx->cells.count(port.first))
                 log_error("Port '%s' doesn't seem to have a corresponding top level IO\n", ctx->nameOf(port.first));
             CellInfo *ci = ctx->cells.at(port.first).get();
@@ -486,27 +496,27 @@ struct NexusPacker
             if (ci->type == ctx->id("$nextpnr_ibuf") || ci->type == ctx->id("$nextpnr_iobuf")) {
                 // Might have an input buffer (IB etc) connected to it
                 is_npnr_iob = true;
-                NetInfo *o = get_net_or_empty(ci, id_O);
+                NetInfo *o = ci->getPort(id_O);
                 if (o == nullptr)
                     ;
-                else if (o->users.size() > 1)
+                else if (o->users.entries() > 1)
                     log_error("Top level pin '%s' has multiple input buffers\n", ctx->nameOf(port.first));
-                else if (o->users.size() == 1)
-                    top_port = o->users.at(0);
+                else if (o->users.entries() == 1)
+                    top_port = *o->users.begin();
             }
             if (ci->type == ctx->id("$nextpnr_obuf") || ci->type == ctx->id("$nextpnr_iobuf")) {
                 // Might have an output buffer (OB etc) connected to it
                 is_npnr_iob = true;
-                NetInfo *i = get_net_or_empty(ci, id_I);
+                NetInfo *i = ci->getPort(id_I);
                 if (i != nullptr && i->driver.cell != nullptr) {
                     if (top_port.cell != nullptr)
                         log_error("Top level pin '%s' has multiple input/output buffers\n", ctx->nameOf(port.first));
                     top_port = i->driver;
                 }
                 // Edge case of a bidirectional buffer driving an output pin
-                if (i->users.size() > 2) {
+                if (i->users.entries() > 2) {
                     log_error("Top level pin '%s' has illegal buffer configuration\n", ctx->nameOf(port.first));
-                } else if (i->users.size() == 2) {
+                } else if (i->users.entries() == 2) {
                     if (top_port.cell != nullptr)
                         log_error("Top level pin '%s' has illegal buffer configuration\n", ctx->nameOf(port.first));
                     for (auto &usr : i->users) {
@@ -534,8 +544,8 @@ struct NexusPacker
                 port.second.net = top_port.cell->ports.at(top_port.port).net;
             }
             // Now remove the nextpnr-inserted buffer
-            disconnect_port(ctx, ci, id_I);
-            disconnect_port(ctx, ci, id_O);
+            ci->disconnectPort(id_I);
+            ci->disconnectPort(id_O);
             ctx->cells.erase(port.first);
         }
     }
@@ -549,11 +559,10 @@ struct NexusPacker
 
     void pack_io()
     {
-        std::unordered_set<IdString> iob_types = {id_IB,          id_OB,          id_OBZ,          id_BB,
-                                                  id_BB_I3C_A,    id_SEIO33,      id_SEIO18,       id_DIFFIO18,
-                                                  id_SEIO33_CORE, id_SEIO18_CORE, id_DIFFIO18_CORE};
+        pool<IdString> iob_types = {id_IB,     id_OB,       id_OBZ,         id_BB,          id_BB_I3C_A,     id_SEIO33,
+                                    id_SEIO18, id_DIFFIO18, id_SEIO33_CORE, id_SEIO18_CORE, id_DIFFIO18_CORE};
 
-        std::unordered_map<IdString, XFormRule> io_rules;
+        dict<IdString, XFormRule> io_rules;
 
         // For the low level primitives, make sure we always preserve their type
         io_rules[id_SEIO33_CORE].new_type = id_SEIO33_CORE;
@@ -567,20 +576,20 @@ struct NexusPacker
         io_rules[id_SEIO33].port_xform[id_PADDT] = id_T;
         io_rules[id_SEIO33].port_xform[id_IOPAD] = id_B;
 
-        io_rules[id_BB_I3C_A] = io_rules[id_SEIO33];
+        io_rules[id_BB_I3C_A] = XFormRule(io_rules[id_SEIO33]);
 
-        io_rules[id_SEIO18] = io_rules[id_SEIO33];
+        io_rules[id_SEIO18] = XFormRule(io_rules[id_SEIO33]);
         io_rules[id_SEIO18].new_type = id_SEIO18_CORE;
 
-        io_rules[id_DIFFIO18] = io_rules[id_SEIO33];
+        io_rules[id_DIFFIO18] = XFormRule(io_rules[id_SEIO33]);
         io_rules[id_DIFFIO18].new_type = id_DIFFIO18_CORE;
 
         // Stage 0: deal with top level inserted IO buffers
         prepare_io();
 
         // Stage 1: setup constraints
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             // Iterate through all IO buffer primitives
             if (!iob_types.count(ci->type))
                 continue;
@@ -604,6 +613,16 @@ struct NexusPacker
                 // Get IO type for reporting purposes
                 std::string io_type = str_or_default(ci->attrs, id_IO_TYPE, "LVCMOS33");
 
+                bool is_wr_bel = (ctx->getBelType(bel) == id_SEIO33_CORE);
+                if (!ctx->io_types.count(io_type))
+                    log_error("IO '%s' has an unsupported IO type '%s'\n", ctx->nameOf(ci), io_type.c_str());
+                bool is_wr_io = (ctx->io_types.at(io_type).style & IOBANK_WR);
+                if (is_wr_io != is_wr_bel) {
+                    log_error("%s IO '%s' requires a %s bank but is placed on pin %s in a %s bank.\n", io_type.c_str(),
+                              ctx->nameOf(ci), (is_wr_io ? "wide-range" : "high-performance"), loc.c_str(),
+                              (is_wr_bel ? "wide-range" : "high-performance"));
+                }
+
                 if (ctx->is_io_type_diff(io_type)) {
                     // Convert from SEIO18 to DIFFIO18
                     if (ctx->getBelType(bel) != id_SEIO18_CORE)
@@ -625,8 +644,8 @@ struct NexusPacker
         // Stage 2: apply rules for primitives that need them
         generic_xform(io_rules, false);
         // Stage 3: all other IO primitives become their bel type
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             // Iterate through all IO buffer primitives
             if (!iob_types.count(ci->type))
                 continue;
@@ -636,13 +655,13 @@ struct NexusPacker
             // For non-bidirectional IO, we also need to configure tristate and rename B
             if (ci->type == id_IB) {
                 ctx->set_cell_pinmux(ci, id_T, PINMUX_1);
-                rename_port(ctx, ci, id_I, id_B);
+                ci->renamePort(id_I, id_B);
             } else if (ci->type == id_OB) {
                 ctx->set_cell_pinmux(ci, id_T, PINMUX_0);
-                rename_port(ctx, ci, id_O, id_B);
+                ci->renamePort(id_O, id_B);
             } else if (ci->type == id_OBZ) {
                 ctx->set_cell_pinmux(ci, id_T, PINMUX_SIG);
-                rename_port(ctx, ci, id_O, id_B);
+                ci->renamePort(id_O, id_B);
             }
             // Get the IO bel
             BelId bel = get_bel_attr(ci);
@@ -660,12 +679,12 @@ struct NexusPacker
         gnd_net = get_const_net(id_VLO);
         dedi_vcc_net = get_const_net(id_VCC_DRV);
         // Iterate through cells
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             // Skip certain cells at this point
             if (ci->type != id_LUT4 && ci->type != id_INV && ci->type != id_VHI && ci->type != id_VLO &&
                 ci->type != id_VCC_DRV)
-                process_inv_constants(cell.second);
+                process_inv_constants(ci);
         }
         // Remove superfluous inverters and constant drivers
         trim_design();
@@ -677,8 +696,8 @@ struct NexusPacker
     {
         int iter = 0;
         std::queue<WireId> visit;
-        std::unordered_set<WireId> seen_wires;
-        std::unordered_set<BelId> seen_bels;
+        pool<WireId> seen_wires;
+        pool<BelId> seen_bels;
 
         BelId bel = get_bel_attr(cell);
         if (bel == BelId())
@@ -751,7 +770,7 @@ struct NexusPacker
         return best_bel;
     }
 
-    std::unordered_set<BelId> used_bels;
+    pool<BelId> used_bels;
 
     // Pre-place a primitive based on routeability first and distance second
     bool preplace_prim(CellInfo *cell, IdString pin, bool strict_routing)
@@ -761,7 +780,7 @@ struct NexusPacker
         if (cell->attrs.count(id_BEL))
             return false;
 
-        NetInfo *pin_net = get_net_or_empty(cell, pin);
+        NetInfo *pin_net = cell->getPort(pin);
         if (pin_net == nullptr)
             return false;
 
@@ -821,30 +840,32 @@ struct NexusPacker
                             Tpred pred)
     {
         // Create the buffered net
-        NetInfo *buffered_net = ctx->createNet(ctx->id(stringf("%s$%s", ctx->nameOf(net), name_postfix.c_str())));
+        NetInfo *buffered_net = ctx->createNet(ctx->idf("%s$%s", ctx->nameOf(net), name_postfix.c_str()));
         // Create the buffer cell
-        CellInfo *buffer = ctx->createCell(
-                ctx->id(stringf("%s$drv_%s", ctx->nameOf(buffered_net), ctx->nameOf(buffer_type))), buffer_type);
+        CellInfo *buffer = ctx->createCell(ctx->idf("%s$drv_%s", ctx->nameOf(buffered_net), ctx->nameOf(buffer_type)),
+                                           buffer_type);
         buffer->addInput(i);
         buffer->addOutput(o);
         // Drive the buffered net with the buffer
-        connect_port(ctx, buffered_net, buffer, o);
+        buffer->connectPort(o, buffered_net);
         // Filter users
         std::vector<PortRef> remaining_users;
 
         for (auto &usr : net->users) {
             if (pred(usr)) {
                 usr.cell->ports[usr.port].net = buffered_net;
-                buffered_net->users.push_back(usr);
+                usr.cell->ports[usr.port].user_idx = buffered_net->users.add(usr);
             } else {
                 remaining_users.push_back(usr);
             }
         }
 
-        std::swap(net->users, remaining_users);
+        net->users.clear();
+        for (auto &usr : remaining_users)
+            usr.cell->ports.at(usr.port).user_idx = net->users.add(usr);
 
         // Connect buffer input to original net
-        connect_port(ctx, net, buffer, i);
+        buffer->connectPort(i, net);
 
         return buffer;
     }
@@ -854,11 +875,14 @@ struct NexusPacker
     {
         std::vector<std::pair<int, IdString>> clk_fanout;
         int available_globals = 16;
-        for (auto net : sorted(ctx->nets)) {
-            NetInfo *ni = net.second;
+        for (auto &net : ctx->nets) {
+            NetInfo *ni = net.second.get();
             // Skip undriven nets; and nets that are already global
             if (ni->driver.cell == nullptr)
                 continue;
+            if (ni->driver.cell->type == id_DCS) {
+                continue;
+            }
             if (ni->driver.cell->type == id_DCC) {
                 --available_globals;
                 continue;
@@ -882,7 +906,8 @@ struct NexusPacker
         for (size_t i = 0; i < std::min<size_t>(clk_fanout.size(), available_globals); i++) {
             NetInfo *net = ctx->nets.at(clk_fanout.at(i).second).get();
             log_info("     promoting clock net '%s'\n", ctx->nameOf(net));
-            insert_buffer(net, id_DCC, "glb_clk", id_CLKI, id_CLKO, [](const PortRef &port) { return true; });
+            insert_buffer(net, id_DCC, "glb_clk", id_CLKI, id_CLKO,
+                          [&](const PortRef &port) { return port.cell->type != id_DCC; });
         }
     }
 
@@ -891,33 +916,61 @@ struct NexusPacker
     {
         // Keep running until we reach a fixed point
         log_info("Placing globals...\n");
-        bool did_something = true;
-        while (did_something) {
-            did_something = false;
-            for (auto cell : sorted(ctx->cells)) {
-                CellInfo *ci = cell.second;
-                if (ci->type == id_OSC_CORE)
-                    did_something |= preplace_singleton(ci);
-                else if (ci->type == id_DCC)
-                    did_something |= preplace_prim(ci, id_CLKI, false);
-                else if (ci->type == id_PLL_CORE)
-                    did_something |= preplace_prim(ci, id_REFCK, false);
+        TopoSort<IdString> sorter;
+        auto is_glb_cell = [&](const CellInfo *cell) {
+            return cell->type.in(id_OSC_CORE, id_DCC, id_PLL_CORE, id_DCS);
+        };
+
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (is_glb_cell(ci)) {
+                sorter.node(ci->name);
+
+                auto do_pin = [&](IdString pin) {
+                    NetInfo *net = ci->getPort(pin);
+                    if (!net || !net->driver.cell || !is_glb_cell(net->driver.cell))
+                        return;
+                    sorter.edge(net->driver.cell->name, ci->name);
+                };
+
+                if (ci->type == id_PLL_CORE) {
+                    do_pin(id_REFCK);
+                } else if (ci->type == id_DCC) {
+                    do_pin(id_CLKI);
+                } else if (ci->type == id_DCS) {
+                    do_pin(id_CLK0);
+                    do_pin(id_CLK1);
+                }
             }
+        }
+
+        sorter.sort();
+
+        for (IdString cell_name : sorter.sorted) {
+            CellInfo *ci = ctx->cells.at(cell_name).get();
+            if (ci->type == id_OSC_CORE)
+                preplace_singleton(ci);
+            else if (ci->type == id_DCC)
+                preplace_prim(ci, id_CLKI, false);
+            else if (ci->type == id_PLL_CORE)
+                preplace_prim(ci, id_REFCK, false);
+            else if (ci->type == id_DCS)
+                preplace_prim(ci, id_CLK0, false);
         }
     }
 
     // Get a bus port name
-    IdString bus(const std::string &base, int i) { return ctx->id(stringf("%s[%d]", base.c_str(), i)); }
+    IdString bus(const std::string &base, int i) { return ctx->idf("%s[%d]", base.c_str(), i); }
 
-    IdString bus_flat(const std::string &base, int i) { return ctx->id(stringf("%s%d", base.c_str(), i)); }
+    IdString bus_flat(const std::string &base, int i) { return ctx->idf("%s%d", base.c_str(), i); }
 
     // Pack a LUTRAM into COMB and RAMW cells
     void pack_lutram()
     {
         // Do this so we don't have an iterate-and-modfiy situation
         std::vector<CellInfo *> lutrams;
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (ci->type != id_DPR16X4)
                 continue;
             lutrams.push_back(ci);
@@ -931,62 +984,61 @@ struct NexusPacker
 
         for (CellInfo *ci : lutrams) {
             // Create constituent cells
-            CellInfo *ramw = ctx->createCell(ctx->id(stringf("%s$lutram_ramw$", ctx->nameOf(ci))), id_RAMW);
+            CellInfo *ramw = ctx->createCell(ctx->idf("%s$lutram_ramw$", ctx->nameOf(ci)), id_RAMW);
             std::vector<CellInfo *> combs;
             for (int i = 0; i < 4; i++)
-                combs.push_back(
-                        ctx->createCell(ctx->id(stringf("%s$lutram_comb[%d]$", ctx->nameOf(ci), i)), id_OXIDE_COMB));
+                combs.push_back(ctx->createCell(ctx->idf("%s$lutram_comb[%d]$", ctx->nameOf(ci), i), id_OXIDE_COMB));
             // Rewiring - external WCK and WRE
-            replace_port(ci, id_WCK, ramw, id_CLK);
-            replace_port(ci, id_WRE, ramw, id_LSR);
+            ci->movePortTo(id_WCK, ramw, id_CLK);
+            ci->movePortTo(id_WRE, ramw, id_LSR);
 
             // Internal WCK and WRE signals
             ramw->addOutput(id_WCKO);
             ramw->addOutput(id_WREO);
-            NetInfo *int_wck = ctx->createNet(ctx->id(stringf("%s$lutram_wck$", ctx->nameOf(ci))));
-            NetInfo *int_wre = ctx->createNet(ctx->id(stringf("%s$lutram_wre$", ctx->nameOf(ci))));
-            connect_port(ctx, int_wck, ramw, id_WCKO);
-            connect_port(ctx, int_wre, ramw, id_WREO);
+            NetInfo *int_wck = ctx->createNet(ctx->idf("%s$lutram_wck$", ctx->nameOf(ci)));
+            NetInfo *int_wre = ctx->createNet(ctx->idf("%s$lutram_wre$", ctx->nameOf(ci)));
+            ramw->connectPort(id_WCKO, int_wck);
+            ramw->connectPort(id_WREO, int_wre);
 
-            uint64_t initval = ctx->parse_lattice_param(ci, id_INITVAL, 64, 0).as_int64();
+            uint64_t initval = ctx->parse_lattice_param_from_cell(ci, id_INITVAL, 64, 0).as_int64();
 
             // Rewiring - buses
             for (int i = 0; i < 4; i++) {
                 // Write address - external
-                replace_port(ci, bus("WAD", i), ramw, ramw_wado[i]);
+                ci->movePortTo(bus("WAD", i), ramw, ramw_wado[i]);
                 // Write data - external
-                replace_port(ci, bus("DI", i), ramw, ramw_wdo[i]);
+                ci->movePortTo(bus("DI", i), ramw, ramw_wdo[i]);
                 // Read data
-                replace_port(ci, bus("DO", i), combs[i], id_F);
+                ci->movePortTo(bus("DO", i), combs[i], id_F);
                 // Read address
-                NetInfo *rad = get_net_or_empty(ci, bus("RAD", i));
+                NetInfo *rad = ci->getPort(bus("RAD", i));
                 if (rad != nullptr) {
                     for (int j = 0; j < 4; j++) {
                         IdString port = (j % 2) ? comb1_rad[i] : comb0_rad[i];
                         combs[j]->addInput(port);
-                        connect_port(ctx, rad, combs[j], port);
+                        combs[j]->connectPort(port, rad);
                     }
-                    disconnect_port(ctx, ci, bus("RAD", i));
+                    ci->disconnectPort(bus("RAD", i));
                 }
                 // Write address - internal
-                NetInfo *int_wad = ctx->createNet(ctx->id(stringf("%s$lutram_wad[%d]$", ctx->nameOf(ci), i)));
+                NetInfo *int_wad = ctx->createNet(ctx->idf("%s$lutram_wad[%d]$", ctx->nameOf(ci), i));
                 ramw->addOutput(bus_flat("WADO", i));
-                connect_port(ctx, int_wad, ramw, bus_flat("WADO", i));
+                ramw->connectPort(bus_flat("WADO", i), int_wad);
                 for (int j = 0; j < 4; j++) {
                     combs[j]->addInput(bus_flat("WAD", i));
-                    connect_port(ctx, int_wad, combs[j], bus_flat("WAD", i));
+                    combs[j]->connectPort(bus_flat("WAD", i), int_wad);
                 }
                 // Write data - internal
-                NetInfo *int_wd = ctx->createNet(ctx->id(stringf("%s$lutram_wd[%d]$", ctx->nameOf(ci), i)));
+                NetInfo *int_wd = ctx->createNet(ctx->idf("%s$lutram_wd[%d]$", ctx->nameOf(ci), i));
                 ramw->addOutput(bus_flat("WDO", i));
-                connect_port(ctx, int_wd, ramw, bus_flat("WDO", i));
+                ramw->connectPort(bus_flat("WDO", i), int_wd);
                 combs[i]->addInput(id_WDI);
-                connect_port(ctx, int_wd, combs[i], id_WDI);
+                combs[i]->connectPort(id_WDI, int_wd);
                 // Write clock and enable - internal
                 combs[i]->addInput(id_WCK);
                 combs[i]->addInput(id_WRE);
-                connect_port(ctx, int_wck, combs[i], id_WCK);
-                connect_port(ctx, int_wre, combs[i], id_WRE);
+                combs[i]->connectPort(id_WCK, int_wck);
+                combs[i]->connectPort(id_WRE, int_wre);
                 // Remap init val
                 uint64_t split_init = 0;
                 for (int j = 0; j < 16; j++)
@@ -1000,12 +1052,13 @@ struct NexusPacker
             // Setup relative constraints
             combs[0]->constr_z = 0;
             combs[0]->constr_abs_z = true;
+            combs[0]->cluster = combs[0]->name;
             for (int i = 1; i < 4; i++) {
                 combs[i]->constr_x = 0;
                 combs[i]->constr_y = 0;
                 combs[i]->constr_z = ((i / 2) << 3) | (i % 2);
                 combs[i]->constr_abs_z = true;
-                combs[i]->constr_parent = combs[0];
+                combs[i]->cluster = combs[0]->name;
                 combs[0]->constr_children.push_back(combs[i]);
             }
 
@@ -1013,7 +1066,7 @@ struct NexusPacker
             ramw->constr_y = 0;
             ramw->constr_z = (2 << 3) | Arch::BEL_RAMW;
             ramw->constr_abs_z = true;
-            ramw->constr_parent = combs[0];
+            ramw->cluster = combs[0]->name;
             combs[0]->constr_children.push_back(ramw);
             // Remove now-packed cell
             ctx->cells.erase(ci->name);
@@ -1023,15 +1076,38 @@ struct NexusPacker
     void convert_prims()
     {
         // Convert primitives from their non-CORE variant to their CORE variant
-        static const std::unordered_map<IdString, IdString> prim_map = {
-                {id_OSCA, id_OSC_CORE},          {id_DP16K, id_DP16K_MODE},       {id_PDP16K, id_PDP16K_MODE},
-                {id_PDPSC16K, id_PDPSC16K_MODE}, {id_SP16K, id_SP16K_MODE},       {id_FIFO16K, id_FIFO16K_MODE},
-                {id_SP512K, id_SP512K_MODE},     {id_DPSC512K, id_DPSC512K_MODE}, {id_PDPSC512K, id_PDPSC512K_MODE},
-                {id_PLL, id_PLL_CORE},           {id_DPHY, id_DPHY_CORE},
+        static const dict<IdString, IdString> prim_map = {
+                {id_OSCA, id_OSC_CORE},
+                {id_DP16K, id_DP16K_MODE},
+                {id_PDP16K, id_PDP16K_MODE},
+                {id_PDPSC16K, id_PDPSC16K_MODE},
+                {id_SP16K, id_SP16K_MODE},
+                {id_FIFO16K, id_FIFO16K_MODE},
+                {id_SP512K, id_SP512K_MODE},
+                {id_DPSC512K, id_DPSC512K_MODE},
+                {id_PDPSC512K, id_PDPSC512K_MODE},
+                {id_PLL, id_PLL_CORE},
+                {id_DPHY, id_DPHY_CORE},
+                {id_MULTIBOOT, id_CONFIG_MULTIBOOT_CORE},
+                {id_CONFIG_LMMI, id_CONFIG_LMMI_CORE},
         };
 
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        // extra prefix needed for this primitive for some reason
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->type != id_MULTIBOOT)
+                continue;
+            std::vector<IdString> pin_names;
+            for (const auto &port : ci->ports) {
+                pin_names.push_back(port.first);
+            }
+            for (auto pin_name : pin_names) {
+                ci->renamePort(pin_name, ctx->idf("CIB%s", pin_name.c_str(ctx)));
+            }
+        }
+
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (!prim_map.count(ci->type))
                 continue;
             prim_to_core(ci, prim_map.at(ci->type));
@@ -1047,7 +1123,7 @@ struct NexusPacker
 
     void pack_bram()
     {
-        std::unordered_map<IdString, XFormRule> bram_rules;
+        dict<IdString, XFormRule> bram_rules;
         bram_rules[id_DP16K_MODE].new_type = id_OXIDE_EBR;
         bram_rules[id_DP16K_MODE].set_params.emplace_back(id_MODE, std::string("DP16K"));
         bram_rules[id_DP16K_MODE].parse_params.emplace_back(id_CSDECODE_A, id_CSDECODE_A, 3, 7);
@@ -1073,7 +1149,7 @@ struct NexusPacker
         add_bus_xform(bram_rules[id_PDP16K_MODE], "DO", "DOA", 18, 18, 0);
 
         // Pseudo dual port; single clock
-        bram_rules[id_PDPSC16K_MODE] = bram_rules[id_PDP16K_MODE];
+        bram_rules[id_PDPSC16K_MODE] = XFormRule(bram_rules[id_PDP16K_MODE]);
         bram_rules[id_PDPSC16K_MODE].set_params.clear();
         bram_rules[id_PDPSC16K_MODE].set_params.emplace_back(id_MODE, std::string("PDPSC16K"));
         bram_rules[id_PDPSC16K_MODE].set_params.emplace_back(id_WEAMUX, std::string("1"));
@@ -1083,8 +1159,8 @@ struct NexusPacker
         generic_xform(bram_rules, true);
 
         int wid = 2;
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (ci->type != id_OXIDE_EBR)
                 continue;
             if (ci->params.count(id_WID))
@@ -1095,7 +1171,7 @@ struct NexusPacker
 
     void pack_lram()
     {
-        std::unordered_map<IdString, XFormRule> lram_rules;
+        dict<IdString, XFormRule> lram_rules;
         lram_rules[id_SP512K_MODE].new_type = id_LRAM_CORE;
         lram_rules[id_SP512K_MODE].set_params.emplace_back(id_EBR_SP_EN, std::string("ENABLE"));
         lram_rules[id_SP512K_MODE].port_xform[id_CE] = id_CEA;
@@ -1103,6 +1179,7 @@ struct NexusPacker
         lram_rules[id_SP512K_MODE].port_xform[id_WE] = id_WEA;
         lram_rules[id_SP512K_MODE].port_xform[id_RSTOUT] = id_RSTA;
         lram_rules[id_SP512K_MODE].port_xform[id_CEOUT] = id_OCEA;
+        lram_rules[id_SP512K_MODE].param_xform[id_OUTREG] = id_OUT_REGMODE_A;
         add_bus_xform(lram_rules[id_SP512K_MODE], "DI", "DIA", 32);
         add_bus_xform(lram_rules[id_SP512K_MODE], "DO", "DOA", 32);
         add_bus_xform(lram_rules[id_SP512K_MODE], "AD", "ADA", 14);
@@ -1115,6 +1192,7 @@ struct NexusPacker
         lram_rules[id_PDPSC512K_MODE].port_xform[id_CSR] = id_CSB;
         lram_rules[id_PDPSC512K_MODE].port_xform[id_WE] = id_WEA;
         lram_rules[id_PDPSC512K_MODE].port_xform[id_RSTR] = id_RSTB;
+        lram_rules[id_PDPSC512K_MODE].param_xform[id_OUTREG] = id_OUT_REGMODE_B;
         add_bus_xform(lram_rules[id_PDPSC512K_MODE], "DI", "DIA", 32);
         add_bus_xform(lram_rules[id_PDPSC512K_MODE], "DO", "DOB", 32);
         add_bus_xform(lram_rules[id_PDPSC512K_MODE], "ADW", "ADA", 14);
@@ -1124,15 +1202,17 @@ struct NexusPacker
         lram_rules[id_DPSC512K_MODE].new_type = id_LRAM_CORE;
         lram_rules[id_DPSC512K_MODE].port_xform[id_CEOUTA] = id_OCEA;
         lram_rules[id_DPSC512K_MODE].port_xform[id_CEOUTB] = id_OCEB;
+        lram_rules[id_DPSC512K_MODE].param_xform[id_OUTREG_A] = id_OUT_REGMODE_A;
+        lram_rules[id_DPSC512K_MODE].param_xform[id_OUTREG_B] = id_OUT_REGMODE_B;
 
         log_info("Packing LRAM...\n");
         generic_xform(lram_rules, true);
 
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (ci->type != id_LRAM_CORE)
                 continue;
-            if (str_or_default(ci->params, ctx->id("ECC_BYTE_SEL"), "BYTE_EN") == "BYTE_EN")
+            if (str_or_default(ci->params, id_ECC_BYTE_SEL, "BYTE_EN") == "BYTE_EN")
                 continue;
             for (int i = 0; i < 0x80; i++) {
                 // FIXME: document ECC and remove this DRC
@@ -1147,11 +1227,222 @@ struct NexusPacker
         }
     }
 
+    void pack_iodelay()
+    {
+        dict<IdString, XFormRule> base_iodelay_rules;
+        base_iodelay_rules[id_DELAYB].new_type = id_IOLOGIC;
+
+        base_iodelay_rules[id_DELAYB].param_xform[id_DEL_VALUE] = ctx->id("DELAY.DEL_VALUE");
+        base_iodelay_rules[id_DELAYB].param_xform[id_COARSE_DELAY] = ctx->id("DELAY.COARSE_DELAY");
+
+        base_iodelay_rules[id_DELAYA] = base_iodelay_rules[id_DELAYB];
+
+        base_iodelay_rules[id_DELAYA].param_xform[id_COARSE_DELAY_MODE] = ctx->id("DELAY.COARSE_DELAY_MODE");
+        base_iodelay_rules[id_DELAYA].param_xform[id_EDGE_MONITOR] = ctx->id("DELAY.EDGE_MONITOR");
+        base_iodelay_rules[id_DELAYA].param_xform[id_WAIT_FOR_EDGE] = ctx->id("DELAY.WAIT_FOR_EDGE");
+
+        base_iodelay_rules[id_DELAYA].port_xform[id_COARSE0] = id_CIBCRS0;
+        base_iodelay_rules[id_DELAYA].port_xform[id_COARSE1] = id_CIBCRS1;
+        base_iodelay_rules[id_DELAYA].port_xform[id_CFLAG] = id_COUT;
+
+        // Find IO delays, and convert them to IOLOGIC
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (!ci->type.in(id_DELAYA, id_DELAYB))
+                continue;
+            if (str_or_default(ci->params, id_DEL_MODE, "USER_DEFINED") != "USER_DEFINED") {
+                // TODO: DEL_MODE (we need to work out how to convert these to a DEL_VALUE)
+                log_error("DEL_MODE other than \"USER_DEFINED\" is not supported on DELAY '%s'\n", ci->name.c_str(ctx));
+            }
+            xform_cell(base_iodelay_rules, ci);
+
+            NetInfo *a = ci->getPort(id_A);
+            if (a != nullptr && a->driver.cell != nullptr &&
+                a->driver.cell->type.in(id_SEIO18_CORE, id_SEIO33_CORE, id_DIFFIO18_CORE)) {
+                // It's an input delay
+                log_info("   processing input delay cell '%s'\n", ci->name.c_str(ctx));
+                ci->params[id_INMUX] = std::string("DELAY");
+                ci->renamePort(id_A, id_DI);
+                ci->renamePort(id_Z, id_INDD);
+                continue;
+            }
+            NetInfo *z = ci->getPort(id_Z);
+            if (z != nullptr && z->users.entries() == 1 &&
+                (*z->users.begin()).cell->type.in(id_SEIO18_CORE, id_SEIO33_CORE, id_DIFFIO18_CORE)) {
+                // It's an output delay
+                log_info("   processing output delay cell '%s'\n", ci->name.c_str(ctx));
+                ci->params[id_OUTMUX] = std::string("DELAY");
+                ci->renamePort(id_A, id_TXDATA0);
+                ci->renamePort(id_Z, id_DOUT);
+                continue;
+            }
+            log_error("Failed to determine if delay cell '%s' was an input or output delay.\n", ci->name.c_str(ctx));
+        }
+    }
+
+    void transform_iologic()
+    {
+        dict<IdString, XFormRule> iol_rules;
+        iol_rules[id_IDDRX1].new_type = id_IOLOGIC;
+        iol_rules[id_IDDRX1].set_params.emplace_back(id_MODE, std::string("IDDRX1_ODDRX1"));
+        iol_rules[id_IDDRX1].port_xform[id_SCLK] = id_SCLKIN;
+        iol_rules[id_IDDRX1].port_xform[id_RST] = id_LSRIN;
+        iol_rules[id_IDDRX1].port_xform[id_D] = id_DI;
+        iol_rules[id_IDDRX1].port_xform[id_Q0] = id_RXDATA0;
+        iol_rules[id_IDDRX1].port_xform[id_Q1] = id_RXDATA1;
+
+        iol_rules[id_ODDRX1].new_type = id_IOLOGIC;
+        iol_rules[id_ODDRX1].set_params.emplace_back(id_MODE, std::string("IDDRX1_ODDRX1"));
+        iol_rules[id_ODDRX1].set_params.emplace_back(ctx->id("IDDRX1_ODDRX1.OUTPUT"), std::string("ENABLED"));
+        iol_rules[id_ODDRX1].port_xform[id_SCLK] = id_SCLKOUT;
+        iol_rules[id_ODDRX1].port_xform[id_RST] = id_LSROUT;
+        iol_rules[id_ODDRX1].port_xform[id_Q] = id_DOUT;
+        iol_rules[id_ODDRX1].port_xform[id_D0] = id_TXDATA0;
+        iol_rules[id_ODDRX1].port_xform[id_D1] = id_TXDATA1;
+
+        generic_xform(iol_rules, true);
+    }
+
+    void merge_iol_cell(CellInfo *base, CellInfo *mergee)
+    {
+        for (auto &param : mergee->params) {
+            if (param.first == id_MODE && base->params.count(id_MODE) && param.second.as_string() == "IREG_OREG")
+                continue; // mixed tristate register and I/ODDR
+            base->params[param.first] = param.second;
+        }
+        for (auto &port : mergee->ports) {
+            mergee->movePortTo(port.first, base, port.first);
+        }
+        ctx->cells.erase(mergee->name);
+    }
+
+    void merge_delay_iol()
+    {
+        // Find pairs of delay IOLOGIC and logic IOLOGIC
+        // <delay iol, logic iol, ouput>
+        std::vector<std::tuple<CellInfo *, CellInfo *, bool>> delay_iol;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (!ci->type.in(id_SIOLOGIC, id_IOLOGIC))
+                continue;
+            NetInfo *indd = ci->getPort(id_INDD);
+            if (indd && indd->users.entries() == 1) {
+                auto usr = *(indd->users.begin());
+                if (usr.cell->type.in(id_IOLOGIC, id_SIOLOGIC) && usr.port == id_DI) {
+                    delay_iol.emplace_back(ci, usr.cell, false);
+                    continue;
+                }
+            }
+            NetInfo *txdata0 = ci->getPort(id_TXDATA0);
+            if (txdata0 && txdata0->driver.cell != nullptr) {
+                auto drv = txdata0->driver;
+                if (drv.cell->type.in(id_IOLOGIC, id_SIOLOGIC) && drv.port == id_DOUT) {
+                    delay_iol.emplace_back(ci, drv.cell, true);
+                    continue;
+                }
+            }
+        }
+        // Combine the pairs together
+        for (const auto &iol_pair : delay_iol) {
+            CellInfo *delay_iol, *logic_iol;
+            bool is_output;
+            std::tie(delay_iol, logic_iol, is_output) = iol_pair;
+            // Copy delay parameters across (except MODE)
+            for (auto &param : delay_iol->params) {
+                if (param.first == id_MODE)
+                    continue;
+                logic_iol->params[param.first] = param.second;
+            }
+            // Deal with interconnectivity
+            if (is_output) {
+                // Configure delay for use with DDR
+                logic_iol->params[id_DELAYMUX] = std::string("OUT_REG");
+
+                NetInfo *out_net = delay_iol->getPort(id_DOUT);
+                delay_iol->disconnectPort(id_DOUT);
+                delay_iol->disconnectPort(id_TXDATA0);
+                logic_iol->disconnectPort(id_DOUT);
+                logic_iol->connectPort(id_DOUT, out_net);
+            } else {
+                NetInfo *in_net = delay_iol->getPort(id_DI);
+                delay_iol->disconnectPort(id_DI);
+                delay_iol->disconnectPort(id_INDD);
+                logic_iol->disconnectPort(id_DI);
+                logic_iol->connectPort(id_DI, in_net);
+            }
+            // Move the rest of the ports
+            for (auto &port : delay_iol->ports) {
+                if (!port.second.net)
+                    continue;
+                delay_iol->movePortTo(port.first, logic_iol, port.first);
+            }
+            log_info("   merged delay IOLOGIC '%s' into logic IOLOGIC '%s'\n", delay_iol->name.c_str(ctx),
+                     logic_iol->name.c_str(ctx));
+            ctx->cells.erase(delay_iol->name);
+        }
+    }
+
+    void constrain_merge_iol()
+    {
+        dict<IdString, std::vector<CellInfo *>> io_to_iol;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->type != id_IOLOGIC)
+                continue;
+            CellInfo *iob = nullptr;
+            NetInfo *di = ci->getPort(id_DI);
+            if (di != nullptr && di->driver.cell != nullptr)
+                iob = di->driver.cell;
+            NetInfo *dout = ci->getPort(id_DOUT);
+            if (dout != nullptr && dout->users.entries() == 1)
+                iob = (*dout->users.begin()).cell;
+            NetInfo *tout = ci->getPort(id_TOUT);
+            if (tout != nullptr && tout->users.entries() == 1)
+                iob = (*tout->users.begin()).cell;
+            if (iob == nullptr ||
+                (iob->type != id_SEIO18_CORE && iob->type != id_SEIO33_CORE && iob->type != id_DIFFIO18_CORE))
+                log_error("Failed to find associated IOB for IOLOGIC %s\n", ctx->nameOf(ci));
+            io_to_iol[iob->name].push_back(ci);
+        }
+        for (auto &io_iol : io_to_iol) {
+            // Merge all IOLOGIC on an IO into a base IOLOGIC
+            CellInfo *iol = io_iol.second.at(0);
+            for (size_t i = 1; i < io_iol.second.size(); i++)
+                merge_iol_cell(iol, io_iol.second.at(i));
+            // Constrain, and update type if appropriate
+            CellInfo *iob = ctx->cells.at(io_iol.first).get();
+            if (iob->type == id_SEIO33_CORE) {
+                iol->type = id_SIOLOGIC;
+                // DELAYMUX does not exist in SIOLOGIC, implicit from OUTMUX in this case
+                iol->params.erase(id_DELAYMUX);
+            }
+            Loc iol_loc = ctx->getBelLocation(get_bel_attr(iob));
+            if (iob->type == id_DIFFIO18_CORE)
+                iol_loc.z = 3;
+            else
+                iol_loc.z += 3;
+            BelId iol_bel = ctx->getBelByLocation(iol_loc);
+            NPNR_ASSERT(iol_bel != BelId());
+            NPNR_ASSERT(ctx->getBelType(iol_bel) == iol->type);
+            log_info("Constraining IOLOGIC %s to bel %s\n", ctx->nameOf(iol), ctx->nameOfBel(iol_bel));
+            iol->attrs[id_BEL] = ctx->getBelName(iol_bel).str(ctx);
+        }
+    }
+
+    void pack_iologic()
+    {
+        log_info("Packing IOLOGIC...\n");
+        pack_iodelay();
+        transform_iologic();
+        merge_delay_iol();
+        constrain_merge_iol();
+    }
+
     void pack_widefn()
     {
         std::vector<CellInfo *> widefns;
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (ci->type != id_WIDEFN9)
                 continue;
             widefns.push_back(ci);
@@ -1160,33 +1451,33 @@ struct NexusPacker
         for (CellInfo *ci : widefns) {
             std::vector<CellInfo *> combs;
             for (int i = 0; i < 2; i++)
-                combs.push_back(
-                        ctx->createCell(ctx->id(stringf("%s$widefn_comb[%d]$", ctx->nameOf(ci), i)), id_OXIDE_COMB));
+                combs.push_back(ctx->createCell(ctx->idf("%s$widefn_comb[%d]$", ctx->nameOf(ci), i), id_OXIDE_COMB));
 
             for (int i = 0; i < 2; i++) {
-                replace_port(ci, bus_flat("A", i), combs[i], id_A);
-                replace_port(ci, bus_flat("B", i), combs[i], id_B);
-                replace_port(ci, bus_flat("C", i), combs[i], id_C);
-                replace_port(ci, bus_flat("D", i), combs[i], id_D);
+                ci->movePortTo(bus_flat("A", i), combs[i], id_A);
+                ci->movePortTo(bus_flat("B", i), combs[i], id_B);
+                ci->movePortTo(bus_flat("C", i), combs[i], id_C);
+                ci->movePortTo(bus_flat("D", i), combs[i], id_D);
             }
 
-            replace_port(ci, id_SEL, combs[0], id_SEL);
-            replace_port(ci, id_Z, combs[0], id_OFX);
+            ci->movePortTo(id_SEL, combs[0], id_SEL);
+            ci->movePortTo(id_Z, combs[0], id_OFX);
 
-            NetInfo *f1 = ctx->createNet(ctx->id(stringf("%s$widefn_f1$", ctx->nameOf(ci))));
+            NetInfo *f1 = ctx->createNet(ctx->idf("%s$widefn_f1$", ctx->nameOf(ci)));
             combs[0]->addInput(id_F1);
             combs[1]->addOutput(id_F);
-            connect_port(ctx, f1, combs[1], id_F);
-            connect_port(ctx, f1, combs[0], id_F1);
+            combs[1]->connectPort(id_F, f1);
+            combs[0]->connectPort(id_F1, f1);
 
-            combs[0]->params[id_INIT] = ctx->parse_lattice_param(ci, id_INIT0, 16, 0);
-            combs[1]->params[id_INIT] = ctx->parse_lattice_param(ci, id_INIT1, 16, 0);
+            combs[0]->params[id_INIT] = ctx->parse_lattice_param_from_cell(ci, id_INIT0, 16, 0);
+            combs[1]->params[id_INIT] = ctx->parse_lattice_param_from_cell(ci, id_INIT1, 16, 0);
 
-            combs[1]->constr_parent = combs[0];
+            combs[1]->cluster = combs[0]->name;
             combs[1]->constr_x = 0;
             combs[1]->constr_y = 0;
             combs[1]->constr_z = 1;
             combs[1]->constr_abs_z = false;
+            combs[0]->cluster = combs[0]->name;
             combs[0]->constr_children.push_back(combs[1]);
 
             ctx->cells.erase(ci->name);
@@ -1198,12 +1489,18 @@ struct NexusPacker
         // Find root carry cells
         log_info("Packing carries...\n");
         std::vector<CellInfo *> roots;
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (ci->type != id_CCU2)
                 continue;
-            if (get_net_or_empty(ci, id_CIN) != nullptr)
+            NetInfo *cin = ci->getPort(id_CIN);
+            if (cin) {
+                if (cin->driver.cell && cin->driver.cell->type != id_CCU2) {
+                    log_error("CCU2 '%s' CIN net '%s' driven by non-CCU2 cell '%s'.\n", ctx->nameOf(ci),
+                              ctx->nameOf(cin), ctx->nameOf(cin->driver.cell));
+                }
                 continue;
+            }
             roots.push_back(ci);
         }
         for (CellInfo *root : roots) {
@@ -1216,34 +1513,33 @@ struct NexusPacker
                 // Split the carry into two COMB cells
                 std::vector<CellInfo *> combs;
                 for (int i = 0; i < 2; i++)
-                    combs.push_back(
-                            ctx->createCell(ctx->id(stringf("%s$ccu2_comb[%d]$", ctx->nameOf(ci), i)), id_OXIDE_COMB));
+                    combs.push_back(ctx->createCell(ctx->idf("%s$ccu2_comb[%d]$", ctx->nameOf(ci), i), id_OXIDE_COMB));
                 // Rewire LUT ports
                 for (int i = 0; i < 2; i++) {
                     combs[i]->params[id_MODE] = std::string("CCU2");
-                    replace_port(ci, bus_flat("A", i), combs[i], id_A);
-                    replace_port(ci, bus_flat("B", i), combs[i], id_B);
-                    replace_port(ci, bus_flat("C", i), combs[i], id_C);
-                    replace_port(ci, bus_flat("D", i), combs[i], id_D);
-                    replace_port(ci, bus_flat("S", i), combs[i], id_F);
+                    ci->movePortTo(bus_flat("A", i), combs[i], id_A);
+                    ci->movePortTo(bus_flat("B", i), combs[i], id_B);
+                    ci->movePortTo(bus_flat("C", i), combs[i], id_C);
+                    ci->movePortTo(bus_flat("D", i), combs[i], id_D);
+                    ci->movePortTo(bus_flat("S", i), combs[i], id_F);
                 }
 
                 // External carry chain
-                replace_port(ci, id_CIN, combs[0], id_FCI);
-                replace_port(ci, id_COUT, combs[1], id_FCO);
+                ci->movePortTo(id_CIN, combs[0], id_FCI);
+                ci->movePortTo(id_COUT, combs[1], id_FCO);
 
                 // Copy parameters
                 if (ci->params.count(id_INJECT))
                     combs[0]->params[id_INJECT] = ci->params[id_INJECT];
-                combs[0]->params[id_INIT] = ctx->parse_lattice_param(ci, id_INIT0, 16, 0);
-                combs[1]->params[id_INIT] = ctx->parse_lattice_param(ci, id_INIT1, 16, 0);
+                combs[0]->params[id_INIT] = ctx->parse_lattice_param_from_cell(ci, id_INIT0, 16, 0);
+                combs[1]->params[id_INIT] = ctx->parse_lattice_param_from_cell(ci, id_INIT1, 16, 0);
 
                 // Internal carry net between the two split COMB cells
-                NetInfo *int_cy = ctx->createNet(ctx->id(stringf("%s$widefn_int_cy$", ctx->nameOf(ci))));
+                NetInfo *int_cy = ctx->createNet(ctx->idf("%s$widefn_int_cy$", ctx->nameOf(ci)));
                 combs[0]->addOutput(id_FCO);
                 combs[1]->addInput(id_FCI);
-                connect_port(ctx, int_cy, combs[0], id_FCO);
-                connect_port(ctx, int_cy, combs[1], id_FCI);
+                combs[0]->connectPort(id_FCO, int_cy);
+                combs[1]->connectPort(id_FCI, int_cy);
 
                 // Relative constraints
                 for (int i = 0; i < 2; i++) {
@@ -1253,10 +1549,11 @@ struct NexusPacker
                     if (constr_base == nullptr) {
                         // This is the very first cell in the chain
                         constr_base = combs[i];
+                        constr_base->cluster = constr_base->name;
                     } else {
                         combs[i]->constr_x = (idx / 8);
                         combs[i]->constr_y = 0;
-                        combs[i]->constr_parent = constr_base;
+                        combs[i]->cluster = constr_base->name;
                         constr_base->constr_children.push_back(combs[i]);
                     }
 
@@ -1266,14 +1563,15 @@ struct NexusPacker
                 ctx->cells.erase(ci->name);
 
                 // Find next cell in chain, if it exists
-                NetInfo *fco = get_net_or_empty(combs[1], id_FCO);
+                NetInfo *fco = combs[1]->getPort(id_FCO);
                 ci = nullptr;
                 if (fco != nullptr) {
-                    if (fco->users.size() > 1)
+                    if (fco->users.entries() > 1)
                         log_error("Carry cell '%s' has multiple fanout on FCO\n", ctx->nameOf(combs[1]));
-                    else if (fco->users.size() == 1) {
-                        NPNR_ASSERT(fco->users.at(0).port == id_CIN);
-                        ci = fco->users.at(0).cell;
+                    else if (fco->users.entries() == 1) {
+                        auto &u0 = *fco->users.begin();
+                        NPNR_ASSERT(u0.port == id_CIN);
+                        ci = u0.cell;
                     }
                 }
             } while (ci != nullptr);
@@ -1293,7 +1591,7 @@ struct NexusPacker
 
     // Automatically generate cascade connections downstream of a cell
     // using the temporary placement that we use solely to access the routing graph
-    void auto_cascade_cell(CellInfo *cell, BelId bel, const std::unordered_map<BelId, CellInfo *> &bel2cell)
+    void auto_cascade_cell(CellInfo *cell, BelId bel, const dict<BelId, CellInfo *> &bel2cell)
     {
         // Create outputs based on the actual bel
         for (auto bp : ctx->getBelPins(bel)) {
@@ -1303,7 +1601,7 @@ struct NexusPacker
                 continue;
             cell->addOutput(bp);
         }
-        for (auto port : sorted_ref(cell->ports)) {
+        for (auto &port : cell->ports) {
             // Skip if not an output, or being used already for something else
             if (port.second.type != PORT_OUT || port.second.net != nullptr)
                 continue;
@@ -1319,7 +1617,7 @@ struct NexusPacker
 
             // Standard BFS-type exploration
             std::queue<WireId> visit;
-            std::unordered_set<WireId> in_queue;
+            pool<WireId> in_queue;
             visit.push(start_wire);
             in_queue.insert(start_wire);
             int iter = 0;
@@ -1354,13 +1652,13 @@ struct NexusPacker
                         continue;
 
                     // Skip pins that are already in use
-                    if (get_net_or_empty(other_cell, bp.pin) != nullptr)
+                    if (other_cell->getPort(bp.pin) != nullptr)
                         continue;
                     // Create the input if it doesn't exist
                     if (!other_cell->ports.count(bp.pin))
                         other_cell->addInput(bp.pin);
                     // Make the connection
-                    connect_ports(ctx, cell, port.first, other_cell, bp.pin);
+                    cell->connectPorts(port.first, other_cell, bp.pin);
 
                     if (ctx->debug)
                         log_info("         found %s.%s\n", ctx->nameOf(other_cell), ctx->nameOf(bp.pin));
@@ -1400,8 +1698,8 @@ struct NexusPacker
 
         // We first create a temporary placement so we can access the routing graph
         bool found = false;
-        std::unordered_map<BelId, CellInfo *> bel2cell;
-        std::unordered_map<IdString, BelId> cell2bel;
+        dict<BelId, CellInfo *> bel2cell;
+        dict<IdString, BelId> cell2bel;
 
         for (BelId root_bel : ctx->getBels()) {
             if (ctx->getBelType(root_bel) != root->type)
@@ -1451,23 +1749,24 @@ struct NexusPacker
     // Create a DSP cell
     CellInfo *create_dsp_cell(IdString base_name, IdString type, CellInfo *constr_base, int dx, int dz)
     {
-        IdString name = ctx->id(stringf("%s/%s_x%d_z%d", ctx->nameOf(base_name), ctx->nameOf(type), dx, dz));
+        IdString name = ctx->idf("%s/%s_x%d_z%d", ctx->nameOf(base_name), ctx->nameOf(type), dx, dz);
         CellInfo *cell = ctx->createCell(name, type);
         if (constr_base != nullptr) {
             // We might be constraining against an already-constrained cell
-            if (constr_base->constr_parent != nullptr) {
+            if (constr_base->cluster != ClusterId() && constr_base->cluster != constr_base->name) {
                 cell->constr_x = dx + constr_base->constr_x;
                 cell->constr_y = constr_base->constr_y;
                 cell->constr_z = dz + constr_base->constr_z;
                 cell->constr_abs_z = false;
-                cell->constr_parent = constr_base->constr_parent;
-                constr_base->constr_parent->constr_children.push_back(cell);
+                cell->cluster = constr_base->cluster;
+                ctx->cells.at(constr_base->cluster)->constr_children.push_back(cell);
             } else {
                 cell->constr_x = dx;
                 cell->constr_y = 0;
                 cell->constr_z = dz;
                 cell->constr_abs_z = false;
-                cell->constr_parent = constr_base;
+                cell->cluster = constr_base->name;
+                constr_base->cluster = constr_base->name;
                 constr_base->constr_children.push_back(cell);
             }
         }
@@ -1588,7 +1887,7 @@ struct NexusPacker
         int wide;        // DSP is a "wide" (dot-product) variant
     };
 
-    const std::unordered_map<IdString, DSPMacroType> dsp_types = {
+    const dict<IdString, DSPMacroType> dsp_types = {
             {id_MULT9X9, {9, 9, 0, 18, 1, 0, 0, false, false, -1}},
             {id_MULT18X18, {18, 18, 0, 36, 2, 1, 0, false, false, -1}},
             {id_MULT18X36, {18, 36, 0, 54, 4, 2, 1, false, false, -1}},
@@ -1605,8 +1904,8 @@ struct NexusPacker
         log_info("Packing DSPs...\n");
         std::vector<CellInfo *> to_remove;
 
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (!dsp_types.count(ci->type))
                 continue;
             auto &mt = dsp_types.at(ci->type);
@@ -1621,6 +1920,8 @@ struct NexusPacker
             }
             for (int i = 0; i < mt.N18x18; i++)
                 mult18[i] = create_dsp_cell(ci->name, id_MULT18_CORE, preadd9[0], (i / 2) * 4 + i % 2, 4);
+            if (mt.N18x18 <= 2)
+                preadd9[0]->is_9x9_18x18 = true;
             for (int i = 0; i < mt.N18x36; i++)
                 mult18x36[i] = create_dsp_cell(ci->name, id_MULT18X36_CORE, preadd9[0], (i * 4) + 2, 4);
             for (int i = 0; i < Nreg18; i++) {
@@ -1637,31 +1938,31 @@ struct NexusPacker
 
                 if (mt.wide > 0) {
                     // Dot-product mode special case
-                    copy_bus(ctx, ci, ctx->id(stringf("B%d", (i * 9) / mt.wide)), (i * 9) % mt.wide, true, preadd9[i],
-                             id_B, 0, false, 9);
-                    copy_bus(ctx, ci, ctx->id(stringf("A%d", (i * 9) / mt.wide)), (i * 9) % mt.wide, true, mult9[i],
-                             id_A, 0, false, 9);
-                    copy_port(ctx, ci, id_CLK, mult9[i], id_CLK);
-                    copy_port(ctx, ci, (i > 1) ? id_CEA2A3 : id_CEA0A1, mult9[i], id_CEA);
-                    copy_port(ctx, ci, (i > 1) ? id_RSTA2A3 : id_RSTA0A1, mult9[i], id_RSTA);
-                    copy_port(ctx, ci, id_CLK, preadd9[i], id_CLK);
-                    copy_port(ctx, ci, (i > 1) ? id_CEB2B3 : id_CEB0B1, preadd9[i], id_CEB);
-                    copy_port(ctx, ci, (i > 1) ? id_RSTB2B3 : id_RSTB0B1, preadd9[i], id_RSTB);
+                    ci->copyPortBusTo(ctx->idf("B%d", (i * 9) / mt.wide), (i * 9) % mt.wide, true, preadd9[i], id_B, 0,
+                                      false, 9);
+                    ci->copyPortBusTo(ctx->idf("A%d", (i * 9) / mt.wide), (i * 9) % mt.wide, true, mult9[i], id_A, 0,
+                                      false, 9);
+                    ci->copyPortTo(id_CLK, mult9[i], id_CLK);
+                    ci->copyPortTo((i > 1) ? id_CEA2A3 : id_CEA0A1, mult9[i], id_CEA);
+                    ci->copyPortTo((i > 1) ? id_RSTA2A3 : id_RSTA0A1, mult9[i], id_RSTA);
+                    ci->copyPortTo(id_CLK, preadd9[i], id_CLK);
+                    ci->copyPortTo((i > 1) ? id_CEB2B3 : id_CEB0B1, preadd9[i], id_CEB);
+                    ci->copyPortTo((i > 1) ? id_RSTB2B3 : id_RSTB0B1, preadd9[i], id_RSTB);
                     // Copy register configuration
-                    copy_param(ci, ctx->id(stringf("REGINPUTAB%d", i)), mult9[i], id_REGBYPSA1);
-                    copy_param(ci, ctx->id(stringf("REGINPUTAB%d", i)), preadd9[i], id_REGBYPSBR0);
+                    copy_param(ci, ctx->idf("REGINPUTAB%d", i), mult9[i], id_REGBYPSA1);
+                    copy_param(ci, ctx->idf("REGINPUTAB%d", i), preadd9[i], id_REGBYPSBR0);
                 } else {
                     // B input split across pre-adders
-                    copy_bus(ctx, ci, id_B, b_start, true, preadd9[i], id_B, 0, false, 9);
+                    ci->copyPortBusTo(id_B, b_start, true, preadd9[i], id_B, 0, false, 9);
                     // A input split across MULT9s
-                    copy_bus(ctx, ci, id_A, a_start, true, mult9[i], id_A, 0, false, 9);
+                    ci->copyPortBusTo(id_A, a_start, true, mult9[i], id_A, 0, false, 9);
                     // Connect control set signals
-                    copy_port(ctx, ci, id_CLK, mult9[i], id_CLK);
-                    copy_port(ctx, ci, id_CEA, mult9[i], id_CEA);
-                    copy_port(ctx, ci, id_RSTA, mult9[i], id_RSTA);
-                    copy_port(ctx, ci, id_CLK, preadd9[i], id_CLK);
-                    copy_port(ctx, ci, id_CEB, preadd9[i], id_CEB);
-                    copy_port(ctx, ci, id_RSTB, preadd9[i], id_RSTB);
+                    ci->copyPortTo(id_CLK, mult9[i], id_CLK);
+                    ci->copyPortTo(id_CEA, mult9[i], id_CEA);
+                    ci->copyPortTo(id_RSTA, mult9[i], id_RSTA);
+                    ci->copyPortTo(id_CLK, preadd9[i], id_CLK);
+                    ci->copyPortTo(id_CEB, preadd9[i], id_CEB);
+                    ci->copyPortTo(id_RSTB, preadd9[i], id_RSTB);
                     // Copy register configuration
                     copy_param(ci, id_REGINPUTA, mult9[i], id_REGBYPSA1);
                     copy_param(ci, id_REGINPUTB, preadd9[i], id_REGBYPSBR0);
@@ -1669,12 +1970,12 @@ struct NexusPacker
 
                 // Connect and configure pre-adder if it isn't bypassed
                 if (mt.has_preadd) {
-                    copy_bus(ctx, ci, id_C, 9 * i, true, preadd9[i], id_C, 0, false, 9);
+                    ci->copyPortBusTo(id_C, 9 * i, true, preadd9[i], id_C, 0, false, 9);
                     if (i == (mt.N9x9 - 1))
-                        copy_port(ctx, ci, id_SIGNEDC, preadd9[i], id_C9);
+                        ci->copyPortTo(id_SIGNEDC, preadd9[i], id_C9);
                     copy_param(ci, id_REGINPUTC, preadd9[i], id_REGBYPSBL);
-                    copy_port(ctx, ci, id_CEC, preadd9[i], id_CECL);
-                    copy_port(ctx, ci, id_RSTC, preadd9[i], id_RSTCL);
+                    ci->copyPortTo(id_CEC, preadd9[i], id_CECL);
+                    ci->copyPortTo(id_RSTC, preadd9[i], id_RSTCL);
                     // Enable preadder
                     preadd9[i]->params[id_BYPASS_PREADD9] = std::string("USED");
                     preadd9[i]->params[id_OPC] = std::string("INPUT_C_AS_PREADDER_OPERAND");
@@ -1682,17 +1983,17 @@ struct NexusPacker
                         preadd9[i]->params[id_PREADDCAS_EN] = std::string("ENABLED");
                 } else if (mt.has_addsub) {
                     // Connect only for routeability reasons
-                    copy_bus(ctx, ci, id_C, 10 * i + ((i >= 4) ? 14 : 0), true, preadd9[i], id_C, 0, false, 10);
+                    ci->copyPortBusTo(id_C, 10 * i + ((i >= 4) ? 14 : 0), true, preadd9[i], id_C, 0, false, 10);
                 }
 
                 // Connect up signedness for the most significant nonet
                 if (((b_start + 9) == mt.b_width) || (mt.wide > 0))
-                    copy_port(ctx, ci, mt.has_addsub ? id_SIGNED : id_SIGNEDB, preadd9[i], id_BSIGNED);
+                    ci->copyPortTo(mt.has_addsub ? id_SIGNED : id_SIGNEDB, preadd9[i], id_BSIGNED);
                 if (((a_start + 9) == mt.a_width) || (mt.wide > 0))
-                    copy_port(ctx, ci, mt.has_addsub ? id_SIGNED : id_SIGNEDA, mult9[i], id_ASIGNED);
+                    ci->copyPortTo(mt.has_addsub ? id_SIGNED : id_SIGNEDA, mult9[i], id_ASIGNED);
             }
 
-            bool mult36_used = (mt.a_width >= 36) && (mt.b_width >= 36);
+            bool mult36_used = (mt.a_width >= 36) && (mt.b_width >= 36) && !(mt.wide > 0);
             // Configure mult18x36s
             for (int i = 0; i < mt.N18x36; i++) {
                 mult18x36[i]->params[id_MULT36] = mult36_used ? std::string("ENABLED") : std::string("DISABLED");
@@ -1708,11 +2009,11 @@ struct NexusPacker
             for (int i = 0; i < Nreg18; i++) {
                 // Output split across reg18s
                 if (!mt.has_addsub)
-                    replace_bus(ctx, ci, id_Z, i * 18, true, reg18[i], id_PP, 0, false, 18);
+                    ci->movePortBusTo(id_Z, i * 18, true, reg18[i], id_PP, 0, false, 18);
                 // Connect control set signals
-                copy_port(ctx, ci, id_CLK, reg18[i], id_CLK);
-                copy_port(ctx, ci, mt.has_addsub ? id_CEPIPE : id_CEOUT, reg18[i], id_CEP);
-                copy_port(ctx, ci, mt.has_addsub ? id_RSTPIPE : id_RSTOUT, reg18[i], id_RSTP);
+                ci->copyPortTo(id_CLK, reg18[i], id_CLK);
+                ci->copyPortTo(mt.has_addsub ? id_CEPIPE : id_CEOUT, reg18[i], id_CEP);
+                ci->copyPortTo(mt.has_addsub ? id_RSTPIPE : id_RSTOUT, reg18[i], id_RSTP);
                 // Copy register configuration
                 copy_param(ci, mt.has_addsub ? id_REGPIPELINE : id_REGOUTPUT, reg18[i], id_REGBYPS);
             }
@@ -1725,35 +2026,35 @@ struct NexusPacker
                     acc54[i] = create_dsp_cell(ci->name, id_ACC54_CORE, preadd9[0], (i * 4) + 2, 5);
                 for (int i = 0; i < Nacc54; i++) {
                     // C addsub input
-                    copy_bus(ctx, ci, id_C, 54 * i, true, acc54[i], id_CINPUT, 0, false, 54);
+                    ci->copyPortBusTo(id_C, 54 * i, true, acc54[i], id_CINPUT, 0, false, 54);
                     // Output
-                    replace_bus(ctx, ci, id_Z, i * 54, true, acc54[i], id_SUM0, 0, false, 36);
-                    replace_bus(ctx, ci, id_Z, i * 54 + 36, true, acc54[i], id_SUM1, 0, false, 18);
+                    ci->movePortBusTo(id_Z, i * 54, true, acc54[i], id_SUM0, 0, false, 36);
+                    ci->movePortBusTo(id_Z, i * 54 + 36, true, acc54[i], id_SUM1, 0, false, 18);
                     // Control set
-                    copy_port(ctx, ci, id_CLK, acc54[i], id_CLK);
-                    copy_port(ctx, ci, id_RSTCTRL, acc54[i], id_RSTCTRL);
-                    copy_port(ctx, ci, id_CECTRL, acc54[i], id_CECTRL);
-                    copy_port(ctx, ci, id_RSTCIN, acc54[i], id_RSTCIN);
-                    copy_port(ctx, ci, id_CECIN, acc54[i], id_CECIN);
-                    copy_port(ctx, ci, id_RSTOUT, acc54[i], id_RSTO);
-                    copy_port(ctx, ci, id_CEOUT, acc54[i], id_CEO);
-                    copy_port(ctx, ci, id_RSTC, acc54[i], id_RSTC);
-                    copy_port(ctx, ci, id_CEC, acc54[i], id_CEC);
+                    ci->copyPortTo(id_CLK, acc54[i], id_CLK);
+                    ci->copyPortTo(id_RSTCTRL, acc54[i], id_RSTCTRL);
+                    ci->copyPortTo(id_CECTRL, acc54[i], id_CECTRL);
+                    ci->copyPortTo(id_RSTCIN, acc54[i], id_RSTCIN);
+                    ci->copyPortTo(id_CECIN, acc54[i], id_CECIN);
+                    ci->copyPortTo(id_RSTOUT, acc54[i], id_RSTO);
+                    ci->copyPortTo(id_CEOUT, acc54[i], id_CEO);
+                    ci->copyPortTo(id_RSTC, acc54[i], id_RSTC);
+                    ci->copyPortTo(id_CEC, acc54[i], id_CEC);
                     // Add/acc control
                     if (i == 0)
-                        copy_port(ctx, ci, id_CIN, acc54[i], id_CIN);
+                        ci->copyPortTo(id_CIN, acc54[i], id_CIN);
                     else
                         ctx->set_cell_pinmux(acc54[i], id_CIN, PINMUX_1);
                     if (i == (Nacc54 - 1))
-                        copy_port(ctx, ci, id_SIGNED, acc54[i], id_SIGNEDI);
+                        ci->copyPortTo(id_SIGNED, acc54[i], id_SIGNEDI);
                     if (mt.wide > 0) {
-                        replace_bus(ctx, ci, id_ADDSUB, 0, true, acc54[i], id_ADDSUB, 0, false, 2);
-                        replace_bus(ctx, ci, id_ADDSUB, 2, true, acc54[i], id_M9ADDSUB, 0, false, 2);
+                        ci->movePortBusTo(id_ADDSUB, 0, true, acc54[i], id_ADDSUB, 0, false, 2);
+                        ci->movePortBusTo(id_ADDSUB, 2, true, acc54[i], id_M9ADDSUB, 0, false, 2);
                     } else {
-                        copy_port(ctx, ci, id_ADDSUB, acc54[i], id_ADDSUB0);
-                        copy_port(ctx, ci, id_ADDSUB, acc54[i], id_ADDSUB1);
+                        ci->copyPortTo(id_ADDSUB, acc54[i], id_ADDSUB0);
+                        ci->copyPortTo(id_ADDSUB, acc54[i], id_ADDSUB1);
                     }
-                    copy_port(ctx, ci, id_LOADC, acc54[i], id_LOAD);
+                    ci->copyPortTo(id_LOADC, acc54[i], id_LOAD);
                     // Configuration
                     copy_param(ci, id_REGINPUTC, acc54[i], id_CREGBYPS1);
                     copy_param(ci, id_REGADDSUB, acc54[i], id_ADDSUBSIGNREGBYPS1);
@@ -1788,8 +2089,8 @@ struct NexusPacker
         }
 
         for (auto cell : to_remove) {
-            for (auto port : sorted_ref(cell->ports))
-                disconnect_port(ctx, cell, port.first);
+            for (auto &port : cell->ports)
+                cell->disconnectPort(port.first);
             ctx->cells.erase(cell->name);
         }
     }
@@ -1801,7 +2102,7 @@ struct NexusPacker
 
         auto equals_epsilon = [](delay_t a, delay_t b) { return (std::abs(a - b) / std::max(double(b), 1.0)) < 1e-3; };
 
-        std::unordered_set<IdString> user_constrained, changed_nets;
+        pool<IdString> user_constrained, changed_nets;
         for (auto &net : ctx->nets) {
             if (net.second->clkconstr != nullptr)
                 user_constrained.insert(net.first);
@@ -1879,24 +2180,43 @@ struct NexusPacker
         const int itermax = 5000;
         while (!changed_nets.empty() && iter < itermax) {
             ++iter;
-            std::unordered_set<IdString> changed_cells;
+            pool<IdString> changed_cells;
             for (auto net : changed_nets) {
                 for (auto &user : ctx->nets.at(net)->users)
-                    if (user.port == id_CLKI || user.port == id_REFCK)
+                    if (user.port.in(id_CLKI, id_REFCK))
                         changed_cells.insert(user.cell->name);
                 auto &drv = ctx->nets.at(net)->driver;
-                if (iter == 1 && drv.cell != nullptr && (drv.port == id_HFCLKOUT || drv.port == id_LFCLKOUT))
-                    changed_cells.insert(drv.cell->name);
+                if (iter == 1 && drv.cell != nullptr) {
+                    if (drv.cell->type == id_OSC_CORE && (drv.port.in(id_HFCLKOUT, id_LFCLKOUT)))
+                        changed_cells.insert(drv.cell->name);
+                    if (drv.cell->type == id_DCC && drv.port == id_CLKO)
+                        changed_cells.insert(drv.cell->name);
+                    if (drv.cell->type == id_DCS && drv.port == id_DCSOUT)
+                        changed_cells.insert(drv.cell->name);
+                }
             }
             changed_nets.clear();
-            for (auto cell : sorted(changed_cells)) {
+            for (auto cell : changed_cells) {
                 CellInfo *ci = ctx->cells.at(cell).get();
                 if (ci->type == id_DCC) {
                     copy_constraint(ci, id_CLKI, id_CLKO, 1);
+                } else if (ci->type == id_DCS) {
+                    // For DCC copy the worst case ("fastest") constraint
+                    delay_t period_clk0 = 0, period_clk1 = 0;
+                    bool have_clk0 = get_period(ci, id_CLK0, period_clk0);
+                    bool have_clk1 = get_period(ci, id_CLK1, period_clk1);
+                    if (have_clk0 && !have_clk1) {
+                        copy_constraint(ci, id_CLK0, id_DCSOUT);
+                    } else if (!have_clk0 && have_clk1) {
+                        copy_constraint(ci, id_CLK1, id_DCSOUT);
+                    } else if (have_clk0 && have_clk1) {
+                        set_period(ci, id_DCSOUT, std::min(period_clk0, period_clk1));
+                    }
                 } else if (ci->type == id_OSC_CORE) {
-                    int div = int_or_default(ci->params, ctx->id("HF_CLK_DIV"), 128);
-                    set_period(ci, id_HFCLKOUT, delay_t((1.0e6 / 450) * (div + 1)));
-                    set_period(ci, id_LFCLKOUT, delay_t((1.0e3 / 10)));
+                    int div = int_or_default(ci->params, id_HF_CLK_DIV, 128);
+                    const float tol = 1.07f; // OSCA has +/-7% frequency tolerance, assume the worst case.
+                    set_period(ci, id_HFCLKOUT, delay_t((1.0e6 / 450) * (div + 1) / tol));
+                    set_period(ci, id_LFCLKOUT, delay_t((1.0e9 / 32) / tol));
                 } else if (ci->type == id_PLL_CORE) {
                     static const std::array<IdString, 6> div{id_DIVA, id_DIVB, id_DIVC, id_DIVD, id_DIVE, id_DIVF};
                     static const std::array<IdString, 6> output{id_CLKOP,  id_CLKOS,  id_CLKOS2,
@@ -1908,9 +2228,9 @@ struct NexusPacker
                     log_info("    Input frequency of PLL '%s' is constrained to %.1f MHz\n", ci->name.c_str(ctx),
                              MHz(period_in));
 
-                    int input_div = ctx->parse_lattice_param(ci, id_REF_MMD_DIG, 8, 1).as_int64();
+                    int input_div = ctx->parse_lattice_param_from_cell(ci, id_REF_MMD_DIG, 8, 1).as_int64();
                     period_in *= input_div;
-                    int feedback_div = ctx->parse_lattice_param(ci, id_REF_MMD_DIG, 8, 1).as_int64();
+                    int feedback_div = ctx->parse_lattice_param_from_cell(ci, id_REF_MMD_DIG, 8, 1).as_int64();
                     bool found_fbk = false;
                     std::string clkmux_fb = str_or_default(ci->params, id_CLKMUX_FB, "CMUX_CLKOP");
                     for (int i = 0; i < 6; i++) {
@@ -1918,7 +2238,7 @@ struct NexusPacker
                         if (clkmux_fb != stringf("CMUX_%s", output[i].c_str(ctx)))
                             continue;
                         // Multiply feedback output divider with
-                        feedback_div *= (ctx->parse_lattice_param(ci, div[i], 7, 0).as_int64() + 1);
+                        feedback_div *= (ctx->parse_lattice_param_from_cell(ci, div[i], 7, 0).as_int64() + 1);
                         found_fbk = true;
                     }
                     if (!found_fbk) {
@@ -1932,7 +2252,7 @@ struct NexusPacker
                              MHz(vco_period));
                     for (int i = 0; i < 6; i++) {
                         set_period(ci, output[i],
-                                   (ctx->parse_lattice_param(ci, div[i], 7, 0).as_int64() + 1) * vco_period);
+                                   (ctx->parse_lattice_param_from_cell(ci, div[i], 7, 0).as_int64() + 1) * vco_period);
                     }
                 }
             }
@@ -1941,17 +2261,17 @@ struct NexusPacker
 
     void pack_plls()
     {
-        const std::unordered_map<IdString, std::string> pll_defaults = {
+        const dict<IdString, std::string> pll_defaults = {
                 {id_FLOCK_CTRL, "2X"},     {id_FLOCK_EN, "ENABLED"}, {id_FLOCK_SRC_SEL, "REFCLK"},
                 {id_DIV_DEL, "0b0000001"}, {id_FBK_PI_RC, "0b1100"}, {id_FBK_PR_IC, "0b1000"},
         };
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (ci->type == id_PLL_CORE) {
                 // Extra log to phys rules
-                rename_port(ctx, ci, id_PLLPOWERDOWN_N, id_PLLPDN);
-                rename_port(ctx, ci, id_LMMIWRRD_N, id_LMMIWRRDN);
-                rename_port(ctx, ci, id_LMMIRESET_N, id_LMMIRESETN);
+                ci->renamePort(id_PLLPOWERDOWN_N, id_PLLPDN);
+                ci->renamePort(id_LMMIWRRD_N, id_LMMIWRRDN);
+                ci->renamePort(id_LMMIRESET_N, id_LMMIRESETN);
                 for (auto &defparam : pll_defaults)
                     if (!ci->params.count(defparam.first))
                         ci->params[defparam.first] = defparam.second;
@@ -1962,7 +2282,7 @@ struct NexusPacker
     // Map LOC attribute on DPHY_CORE to a bel
     // TDPHY_CORE2 is Radiant 2.0 style, DPHY0 is Radiant 2.2
     // TODO: LIFCL-17 (perhaps remove the hardcoded map)
-    const std::unordered_map<std::string, std::string> dphy_loc_map = {
+    const dict<std::string, std::string> dphy_loc_map = {
             {"TDPHY_CORE2", "X4/Y0/TDPHY_CORE2"},
             {"DPHY0", "X4/Y0/TDPHY_CORE2"},
             {"TDPHY_CORE26", "X28/Y0/TDPHY_CORE26"},
@@ -1971,8 +2291,8 @@ struct NexusPacker
 
     void pack_ip()
     {
-        for (auto cell : sorted(ctx->cells)) {
-            CellInfo *ci = cell.second;
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
             if (ci->type == id_DPHY_CORE) {
                 auto loc_attr = ci->attrs.find(id_LOC);
                 if (loc_attr == ci->attrs.end())
@@ -1986,11 +2306,400 @@ struct NexusPacker
         }
     }
 
+    // Finds and returns a flip-flop that drives the given port of an IOB cell
+    // If an associated IOLOGIC cell is provided then checks whether the
+    // flip-flop matches its clock and reset.
+    CellInfo *get_ff_for_iob(CellInfo *iob, IdString port, CellInfo *iol)
+    {
+
+        // Get the net
+        NetInfo *net = iob->getPort(port);
+        if (net == nullptr) {
+            return nullptr;
+        }
+
+        // Get the flip-flop that drives it
+        CellInfo *ff = net->driver.cell;
+        if (ff->type != id_OXIDE_FF) {
+            return nullptr;
+        }
+
+        // Get clock nets of IOLOGIC and the flip-flop
+        if (iol != nullptr) {
+            NetInfo *iol_c = iol->getPort(id_SCLKOUT);
+            NetInfo *ff_c = ff->getPort(id_CLK);
+
+            // If one of them is floating or it is not the same net then abort
+            if (iol_c == nullptr || ff_c == nullptr) {
+                return nullptr;
+            }
+            if (iol_c->name != ff_c->name) {
+                return nullptr;
+            }
+        }
+
+        // Get reset nets of IOLOGIC and the flip-flop
+        if (iol != nullptr) {
+            NetInfo *iol_r = iol->getPort(id_LSROUT);
+            NetInfo *ff_r = ff->getPort(id_LSR);
+
+            // If one of them is floating or it is not the same net then abort.
+            // But both can be floating.
+            if (!(iol_r == nullptr && ff_r == nullptr)) {
+                if (iol_r == nullptr || ff_r == nullptr) {
+                    return nullptr;
+                }
+                if (iol_r->name != ff_r->name) {
+                    return nullptr;
+                }
+            }
+        }
+
+        // FIXME: Check if the flip-flop has:
+        // - non-inverted clock
+        // - same reset "type" as ODDR
+        // - others ?
+
+        return ff;
+    }
+
+    // IOLOGIC requires some special handling around itself and IOB. This
+    // function does that.
+    void handle_iologic()
+    {
+        log_info("Packing IOLOGIC...\n");
+
+        // Map of flip-flop cells that drive IOLOGIC+IOB pairs
+        dict<IdString, std::vector<std::pair<IdString, IdString>>> tff_map;
+
+        for (auto &cell : ctx->cells) {
+            CellInfo *iol = cell.second.get();
+            if (iol->type != id_SIOLOGIC && iol->type != id_IOLOGIC) {
+                continue;
+            }
+
+            bool isIDDR = false;
+            bool isODDR = false;
+
+            CellInfo *iob = nullptr;
+            NetInfo *di = iol->getPort(id_DI);
+            if (di != nullptr && di->driver.cell != nullptr) {
+                iob = di->driver.cell;
+                isIDDR = true;
+            }
+            NetInfo *dout = iol->getPort(id_DOUT);
+            if (dout != nullptr && dout->users.entries() == 1) {
+                iob = (*dout->users.begin()).cell;
+                isODDR = true;
+            }
+            NetInfo *tout = iol->getPort(id_TOUT);
+            if (tout != nullptr && tout->users.entries() == 1) {
+                iob = (*tout->users.begin()).cell;
+                isODDR = true; // FIXME: Not sure
+            }
+            NPNR_ASSERT(iob != nullptr);
+
+            // SIOLOGIC handling
+            if (iol->type == id_SIOLOGIC) {
+
+                // We have IDDR+ODDR
+                if (isODDR && isIDDR) {
+                    if (!iob->attrs.count(id_GLITCHFILTER)) {
+                        iob->attrs[id_GLITCHFILTER] = std::string("ON");
+                    }
+                    if (!iob->attrs.count(id_CLAMP)) {
+                        iob->attrs[id_CLAMP] = std::string("ON");
+                    }
+                    if (!iob->attrs.count(id_PULLMODE)) {
+                        iob->attrs[id_PULLMODE] = std::string("DOWN");
+                    }
+                }
+                // We have ODDR only
+                else if (isODDR && !isIDDR) {
+                    if (!iob->attrs.count(id_GLITCHFILTER)) {
+                        iob->attrs[id_GLITCHFILTER] = std::string("OFF");
+                    }
+                    if (!iob->attrs.count(id_CLAMP)) {
+                        iob->attrs[id_CLAMP] = std::string("OFF");
+                    }
+                    if (!iob->attrs.count(id_PULLMODE)) {
+                        iob->attrs[id_PULLMODE] = std::string("NONE");
+                    }
+                }
+
+                // Detect case when SEIO33_CORE.T is not driven by
+                // SIOLOGIC.TOUT. In this case connect SIOLOGIC.TSDATA0 to the
+                // same ned as SEIO33_CORE.I.
+                //
+                //
+                NetInfo *iob_t = iob->getPort(id_T);
+                if (iob_t != nullptr && isODDR) {
+                    NetInfo *iol_t = iol->getPort(id_TOUT);
+
+                    // SIOLOGIC.TOUT is not driving SEIO33_CORE.T
+                    if ((iol_t == nullptr) || (iol_t != nullptr && iol_t->users.empty()) ||
+                        (iol_t != nullptr && !iol_t->users.empty() && iol_t->name != iob_t->name)) {
+
+                        // In this case if SIOLOGIC.TSDATA0 is not connected
+                        // to the same net as SEIO33_CORE.T and is not
+                        // floating then that configuration is illegal.
+                        NetInfo *iol_ti = iol->getPort(id_TSDATA0);
+                        if (iol_ti != nullptr && (iol_ti->name != iob_t->name) && (iol_ti->name != gnd_net->name)) {
+                            log_error("Cannot have %s.TSDATA0 and %s.T driven by different nets (%s vs. %s)\n",
+                                      ctx->nameOf(iol), ctx->nameOf(iob), ctx->nameOf(iol_ti), ctx->nameOf(iob_t));
+                        }
+
+                        // Re-connect TSDATA (even if it has already been
+                        // connected to gnd_net, see the condition above).
+                        if (!iol->ports.count(id_TSDATA0)) {
+                            iol->addInput(id_TSDATA0);
+                        }
+                        iol->disconnectPort(id_TSDATA0);
+                        iol->connectPort(id_TSDATA0, iob_t);
+
+                        if (ctx->debug) {
+                            log_info(" Reconnecting %s.TSDATA0 to %s\n", ctx->nameOf(iol), ctx->nameOf(iob_t));
+                        }
+
+                        // Check if the net wants to use the T flip-flop in
+                        // IOLOGIC
+                        bool syn_useioff = false;
+                        if (iob_t->attrs.count(id_syn_useioff)) {
+                            syn_useioff = iob_t->attrs.at(id_syn_useioff).as_bool();
+                        }
+
+                        // Check if the T input is driven by a flip-flop. Store
+                        // in the map for later integration with IOLOGIC.
+                        CellInfo *ff = get_ff_for_iob(iob, id_T, iol);
+                        if (ff != nullptr && syn_useioff) {
+                            tff_map[ff->name].push_back(std::make_pair(iol->name, iob->name));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Integrate flip-flops that drive T with IOLOGIC
+        for (auto &it : tff_map) {
+            CellInfo *ff = ctx->cells.at(it.first).get();
+
+            NetInfo *ff_d = ff->getPort(id_M); // FIXME: id_D or id_M ?!
+            NPNR_ASSERT(ff_d != nullptr);
+
+            NetInfo *ff_q = ff->getPort(id_Q);
+            NPNR_ASSERT(ff_q != nullptr);
+
+            for (auto &ios : it.second) {
+                CellInfo *iol = ctx->cells.at(ios.first).get();
+                CellInfo *iob = ctx->cells.at(ios.second).get();
+
+                log_info(" Integrating %s into %s\n", ctx->nameOf(ff), ctx->nameOf(iol));
+
+                // Disconnect "old" T net
+                iol->disconnectPort(id_TSDATA0);
+                iob->disconnectPort(id_T);
+
+                // Connect the "new" one
+                iol->connectPort(id_TSDATA0, ff_d);
+                iob->connectPort(id_T, ff_d);
+
+                // Propagate parameters
+                iol->params[id_SRMODE] = ff->params.at(id_SRMODE);
+                iol->params[id_REGSET] = ff->params.at(id_REGSET);
+
+                // Enable the TSREG
+                iol->params[id_CEOUTMUX] = std::string("1");
+                iol->params[ctx->id("TSREG.REGSET")] = std::string("SET");
+                iol->params[ctx->id("IDDRX1_ODDRX1.TRISTATE")] = std::string("ENABLED");
+            }
+
+            // Disconnect the flip-flop
+            for (auto &port : ff->ports) {
+                ff->disconnectPort(port.first);
+            }
+
+            // Check if the flip-flop can be removed
+            bool can_remove = ff_q->users.empty();
+
+            // Remove the flip-flop and its output net
+            if (can_remove) {
+                if (ctx->debug) {
+                    log_info(" Removing %s\n", ctx->nameOf(ff));
+                }
+                ctx->cells.erase(ff->name);
+                ctx->nets.erase(ff_q->name);
+            }
+        }
+    }
+
+    FFControlSet gather_ff_settings(CellInfo *cell)
+    {
+        NPNR_ASSERT(cell->type == id_OXIDE_FF);
+
+        FFControlSet ctrlset;
+        ctrlset.async = str_or_default(cell->params, id_SRMODE, "LSR_OVER_CE") == "ASYNC";
+        ctrlset.regddr_en = is_enabled(cell, id_REGDDR);
+        ctrlset.gsr_en = is_enabled(cell, id_GSR);
+        ctrlset.clkmux = ctx->id(str_or_default(cell->params, id_CLKMUX, "CLK")).index;
+        ctrlset.cemux = ctx->id(str_or_default(cell->params, id_CEMUX, "CE")).index;
+        ctrlset.lsrmux = ctx->id(str_or_default(cell->params, id_LSRMUX, "LSR")).index;
+        ctrlset.clk = cell->getPort(id_CLK);
+        ctrlset.ce = cell->getPort(id_CE);
+        ctrlset.lsr = cell->getPort(id_LSR);
+
+        return ctrlset;
+    }
+
+    void pack_lutffs()
+    {
+        log_info("Inferring LUT+FF pairs...\n");
+
+        float carry_ratio = 1.0f;
+        if (ctx->settings.find(id_carry_lutff_ratio) != ctx->settings.end()) {
+            carry_ratio = ctx->setting<float>("carry_lutff_ratio");
+        }
+
+        // FF control settings/signals are slice-wide. The dict below is used
+        // to track settings of FFs glued to clusters which may span more than
+        // one slice (eg. carry-chains). For now it is assumed that all FFs
+        // in one cluster share the same settings and control signals.
+        dict<IdString, FFControlSet> cluster_ffinfo;
+
+        size_t num_comb = 0;
+        size_t num_ff = 0;
+        size_t num_pair = 0;
+        size_t num_glue = 0;
+
+        for (auto &cell : ctx->cells) {
+            CellInfo *ff = cell.second.get();
+            if (ff->type != id_OXIDE_FF) {
+                continue;
+            }
+
+            num_ff++;
+
+            // Get input net
+            // At the packing stage all inputs go to M
+            NetInfo *di = ff->getPort(id_M);
+            if (di == nullptr || di->driver.cell == nullptr) {
+                continue;
+            }
+
+            // Skip if there are multiple sinks on that net
+            if (di->users.entries() != 1) {
+                continue;
+            }
+
+            // Check if the driver is a LUT and the direct connection is from F
+            CellInfo *lut = di->driver.cell;
+            if (lut->type != id_OXIDE_COMB) {
+                continue;
+            }
+            if (di->driver.port != id_F && di->driver.port != id_OFX) {
+                continue;
+            }
+
+            // The FF must not use M and DI at the same time
+            if (ff->getPort(id_DI)) {
+                continue;
+            }
+
+            // The LUT must be in LOGIC/CARRY mode
+            if (str_or_default(lut->params, id_MODE, "LOGIC") != "LOGIC" &&
+                str_or_default(lut->params, id_MODE, "LOGIC") != "CCU2") {
+                continue;
+            }
+
+            // The FF cannot be in another cluster
+            if (ff->cluster != ClusterId()) {
+                continue;
+            }
+
+            // Get FF settings
+            auto ffinfo = gather_ff_settings(ff);
+
+            // A free LUT, create a new cluster
+            if (lut->cluster == ClusterId()) {
+
+                lut->cluster = lut->name;
+                lut->constr_children.push_back(ff);
+
+                ff->cluster = lut->name;
+                ff->constr_x = 0;
+                ff->constr_y = 0;
+                ff->constr_z = 2;
+                ff->constr_abs_z = false;
+
+                num_pair++;
+            }
+            // Attach the FF to the existing cluster of the LUT
+            else {
+
+                // Check if the FF settings match those of others in this
+                // cluster. If not then reject this FF.
+                //
+                // This is a greedy approach - the first attached FF will
+                // enforce its settings on all following candidates. A better
+                // approach would be to first form groups of matching FFs for
+                // a cluster and then attach only the largest group to it.
+                if (cluster_ffinfo.count(lut->cluster)) {
+                    if (ffinfo != cluster_ffinfo.at(lut->cluster)) {
+                        continue;
+                    }
+                }
+
+                // No order not to make too large carry clusters pack only the
+                // given fraction of FFs there.
+                if (str_or_default(lut->params, id_MODE, "LOGIC") == "CCU2") {
+                    float r = (float)(ctx->rng() % 1000) * 1e-3f;
+                    if (r > carry_ratio) {
+                        continue;
+                    }
+                }
+
+                // Get the cluster root
+                CellInfo *root = ctx->cells.at(lut->cluster).get();
+
+                // Constrain the FF relative to the LUT
+                ff->cluster = root->cluster;
+                ff->constr_x = lut->constr_x;
+                ff->constr_y = lut->constr_y;
+                ff->constr_z = lut->constr_z + 2;
+                ff->constr_abs_z = lut->constr_abs_z;
+                root->constr_children.push_back(ff);
+
+                num_glue++;
+            }
+
+            // Reconnect M to DI
+            ff->renamePort(id_M, id_DI);
+            ff->params[id_SEL] = std::string("DL");
+
+            // Store FF settings of the cluster
+            if (!cluster_ffinfo.count(lut->cluster)) {
+                cluster_ffinfo.emplace(lut->cluster, ffinfo);
+            }
+        }
+
+        // Count OXIDE_COMB, OXIDE_FF are already counted
+        for (auto &cell : ctx->cells) {
+            CellInfo *ff = cell.second.get();
+            if (ff->type == id_OXIDE_COMB) {
+                num_comb++;
+            }
+        }
+
+        // Print statistics
+        log_info("    Created %zu LUT+FF pairs and extended %zu clusters using total %zu FFs and %zu LUTs\n", num_pair,
+                 num_glue, num_ff, num_comb);
+    }
+
     explicit NexusPacker(Context *ctx) : ctx(ctx) {}
 
     void operator()()
     {
         pack_io();
+        pack_iologic();
         pack_dsps();
         convert_prims();
         pack_bram();
@@ -2003,6 +2712,12 @@ struct NexusPacker
         pack_constants();
         pack_luts();
         pack_ip();
+        handle_iologic();
+
+        if (!bool_or_default(ctx->settings, id_no_pack_lutff)) {
+            pack_lutffs();
+        }
+
         promote_globals();
         place_globals();
         generate_constraints();
@@ -2012,7 +2727,7 @@ struct NexusPacker
 bool Arch::pack()
 {
     (NexusPacker(getCtx()))();
-    attrs[id("step")] = std::string("pack");
+    attrs[id_step] = std::string("pack");
     archInfoToAttributes();
     assignArchInfo();
     return true;
@@ -2022,8 +2737,8 @@ bool Arch::pack()
 
 void Arch::assignArchInfo()
 {
-    for (auto cell : sorted(cells)) {
-        assignCellInfo(cell.second);
+    for (auto &cell : cells) {
+        assignCellInfo(cell.second.get());
     }
 }
 
@@ -2040,8 +2755,8 @@ void Arch::assignCellInfo(CellInfo *cell)
         cell->lutInfo.is_memory = str_or_default(cell->params, id_MODE, "LOGIC") == "DPRAM";
         cell->lutInfo.is_carry = str_or_default(cell->params, id_MODE, "LOGIC") == "CCU2";
         cell->lutInfo.mux2_used = port_used(cell, id_OFX);
-        cell->lutInfo.f = get_net_or_empty(cell, id_F);
-        cell->lutInfo.ofx = get_net_or_empty(cell, id_OFX);
+        cell->lutInfo.f = cell->getPort(id_F);
+        cell->lutInfo.ofx = cell->getPort(id_OFX);
         if (cell->lutInfo.is_carry) {
             cell->tmg_portmap[id_A] = id_A0;
             cell->tmg_portmap[id_B] = id_B0;
@@ -2063,11 +2778,11 @@ void Arch::assignCellInfo(CellInfo *cell)
         cell->ffInfo.ctrlset.clkmux = id(str_or_default(cell->params, id_CLKMUX, "CLK")).index;
         cell->ffInfo.ctrlset.cemux = id(str_or_default(cell->params, id_CEMUX, "CE")).index;
         cell->ffInfo.ctrlset.lsrmux = id(str_or_default(cell->params, id_LSRMUX, "LSR")).index;
-        cell->ffInfo.ctrlset.clk = get_net_or_empty(cell, id_CLK);
-        cell->ffInfo.ctrlset.ce = get_net_or_empty(cell, id_CE);
-        cell->ffInfo.ctrlset.lsr = get_net_or_empty(cell, id_LSR);
-        cell->ffInfo.di = get_net_or_empty(cell, id_DI);
-        cell->ffInfo.m = get_net_or_empty(cell, id_M);
+        cell->ffInfo.ctrlset.clk = cell->getPort(id_CLK);
+        cell->ffInfo.ctrlset.ce = cell->getPort(id_CE);
+        cell->ffInfo.ctrlset.lsr = cell->getPort(id_LSR);
+        cell->ffInfo.di = cell->getPort(id_DI);
+        cell->ffInfo.m = cell->getPort(id_M);
         cell->tmg_index = get_cell_timing_idx(id_OXIDE_FF, id("PPP:SYNC"));
     } else if (cell->type == id_RAMW) {
         cell->ffInfo.ctrlset.async = true;
@@ -2076,9 +2791,9 @@ void Arch::assignCellInfo(CellInfo *cell)
         cell->ffInfo.ctrlset.clkmux = id(str_or_default(cell->params, id_CLKMUX, "CLK")).index;
         cell->ffInfo.ctrlset.cemux = ID_CE;
         cell->ffInfo.ctrlset.lsrmux = ID_INV;
-        cell->ffInfo.ctrlset.clk = get_net_or_empty(cell, id_CLK);
+        cell->ffInfo.ctrlset.clk = cell->getPort(id_CLK);
         cell->ffInfo.ctrlset.ce = nullptr;
-        cell->ffInfo.ctrlset.lsr = get_net_or_empty(cell, id_LSR);
+        cell->ffInfo.ctrlset.lsr = cell->getPort(id_LSR);
         cell->ffInfo.di = nullptr;
         cell->ffInfo.m = nullptr;
         cell->tmg_index = get_cell_timing_idx(id_RAMW);
@@ -2100,6 +2815,19 @@ void Arch::assignCellInfo(CellInfo *cell)
         }
 
         cell->tmg_index = get_cell_timing_idx(id(str_or_default(cell->params, id_MODE, "DP16K") + "_MODE"));
+        NPNR_ASSERT(cell->tmg_index != -1);
+    } else if (cell->type == id_LRAM_CORE) {
+        // Strip off bus indices to get the timing ports
+        // as timing is generally word-wide
+        for (const auto &port : cell->ports) {
+            const std::string &name = port.first.str(this);
+            size_t idx_end = name.find_last_not_of("0123456789");
+            std::string base = name.substr(0, idx_end + 1);
+            // Strip off bus index
+            cell->tmg_portmap[port.first] = id(base);
+        }
+
+        cell->tmg_index = get_cell_timing_idx(id_LRAM_CORE);
         NPNR_ASSERT(cell->tmg_index != -1);
     } else if (is_dsp_cell(cell)) {
         // Strip off bus indices to get the timing ports

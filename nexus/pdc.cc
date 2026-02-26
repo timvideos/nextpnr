@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -21,6 +21,7 @@
 #include "log.h"
 #include "nextpnr.h"
 
+#include <algorithm>
 #include <iterator>
 
 NEXTPNR_NAMESPACE_BEGIN
@@ -86,8 +87,8 @@ struct TCLEntity
 
 struct TCLValue
 {
-    TCLValue(const std::string &s) : is_string(true), str(s){};
-    TCLValue(const std::vector<TCLEntity> &l) : is_string(false), list(l){};
+    TCLValue(const std::string &s) : is_string(true), str(s) {};
+    TCLValue(const std::vector<TCLEntity> &l) : is_string(false), list(l) {};
 
     bool is_string;
     std::string str;             // simple string value
@@ -101,7 +102,7 @@ struct PDCParser
     int lineno = 1;
     Context *ctx;
 
-    PDCParser(const std::string &buf, Context *ctx) : buf(buf), ctx(ctx){};
+    PDCParser(const std::string &buf, Context *ctx) : buf(buf), ctx(ctx) {};
 
     inline bool eof() const { return pos == int(buf.size()); }
 
@@ -406,7 +407,7 @@ struct PDCParser
 
     TCLValue cmd_ldc_set_port(const std::vector<TCLValue> &arguments)
     {
-        std::unordered_map<IdString, Property> args;
+        dict<IdString, Property> args;
         for (int i = 1; i < int(arguments.size()); i++) {
             auto &arg = arguments.at(i);
             if (arg.is_string) {
@@ -423,6 +424,12 @@ struct PDCParser
                         if (eqp == std::string::npos)
                             log_error("expected key-value pair separated by '=' (line %d)", lineno);
                         std::string k = kv.substr(0, eqp), v = kv.substr(eqp + 1);
+                        if (k == "SLEWRATE") {
+                            std::vector<std::string> slewrate_allowed = {"SLOW", "MED", "FAST", "NA"};
+                            if (std::find(std::begin(slewrate_allowed), std::end(slewrate_allowed), v) ==
+                                std::end(slewrate_allowed))
+                                log_error("unexpected SLEWRATE configuration %s (line %d)\n", v.c_str(), lineno);
+                        }
                         args[ctx->id(k)] = v;
                     }
                 } else {

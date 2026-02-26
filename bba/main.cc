@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -19,8 +19,8 @@
  */
 
 #include <assert.h>
-#include <boost/filesystem/convenience.hpp>
 #include <boost/program_options.hpp>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <stdint.h>
@@ -409,7 +409,7 @@ int main(int argc, char **argv)
         for (auto &s : preText)
             fprintf(fileOut, "%s\n", s.c_str());
 
-        fprintf(fileOut, "const char %s[%d] =\n\"", streams[0].name.c_str(), int(data.size()) + 1);
+        fprintf(fileOut, "const uint8_t %s[%d] =\n\"", streams[0].name.c_str(), int(data.size()) + 1);
 
         cursor = 1;
         for (int i = 0; i < int(data.size()); i++) {
@@ -443,20 +443,20 @@ int main(int argc, char **argv)
         for (auto &s : postText)
             fprintf(fileOut, "%s\n", s.c_str());
     } else if (writeE) {
-        for (auto &s : preText)
-            fprintf(fileOut, "%s\n", s.c_str());
-
-        fprintf(fileOut, "const char %s[%d] =\n", streams[0].name.c_str(), int(data.size()) + 1);
-        fprintf(fileOut, "#embed_str \"%s\"\n", boost::filesystem::basename(files.at(2)).c_str());
-        fprintf(fileOut, ";\n");
-
-        for (auto &s : postText)
-            fprintf(fileOut, "%s\n", s.c_str());
-
         FILE *fileBin = fopen(files.at(2).c_str(), "wb");
         assert(fileBin != nullptr);
         fwrite(data.data(), int(data.size()), 1, fileBin);
         fclose(fileBin);
+
+        for (auto &s : preText)
+            fprintf(fileOut, "%s\n", s.c_str());
+
+        fprintf(fileOut, "const uint8_t %s[%d] = {\n", streams[0].name.c_str(), int(data.size()) + 1);
+        fprintf(fileOut, "#embed \"%s\"\n", std::filesystem::path(files.at(2)).u8string().c_str());
+        fprintf(fileOut, "};\n");
+
+        for (auto &s : postText)
+            fprintf(fileOut, "%s\n", s.c_str());
     } else {
         fwrite(data.data(), int(data.size()), 1, fileOut);
     }

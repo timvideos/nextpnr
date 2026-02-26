@@ -45,27 +45,31 @@ A scalar type that is used to  represent delays. May be an integer or float type
 
 ### BelId
 
-A type representing a bel name. `BelId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a specialization for `std::hash<BelId>`.
+A type representing a bel name. `BelId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a `unsigned int hash() const` member function.
 
 ### WireId
 
-A type representing a wire name. `WireId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a specialization for `std::hash<WireId>`.
+A type representing a wire name. `WireId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a `unsigned int hash() const` member function.
 
 ### PipId
 
-A type representing a pip name. `PipId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a specialization for `std::hash<PipId>`.
+A type representing a pip name. `PipId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a `unsigned int hash() const` member function.
 
 ### BelBucketId
 
-A type representing a bel bucket. `BelBucketId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a specialization for `std::hash<BelBucketId>`.
+A type representing a bel bucket. `BelBucketId()` must construct a unique null-value. Must provide `==`, `!=`, and `<` operators and a `unsigned int hash() const` member function.
 
 ### GroupId
 
-A type representing a group name. `GroupId()` must construct a unique null-value. Must provide `==` and `!=` operators and a specialization for `std::hash<GroupId>`.
+A type representing a group name. `GroupId()` must construct a unique null-value. Must provide `==` and `!=` operators and a `unsigned int hash() const` member function.
 
 ### DecalId
 
-A type representing a reference to a graphical decal. `DecalId()` must construct a unique null-value. Must provide `==` and `!=` operators and a specialization for `std::hash<DecalId>`.
+A type representing a reference to a graphical decal. `DecalId()` must construct a unique null-value. Must provide `==` and `!=` operators and a `unsigned int hash() const` member function.
+
+### ClusterId
+
+A type representing a reference to a constrained cluster of cells. `ClusterId()` must construct a unique null-value. Must provide `==` and `!=` operators and `unsigned int hash() const` member function.
 
 ### ArchNetInfo
 
@@ -167,7 +171,7 @@ Returns true if the given bel is a global buffer. A global buffer does not "pull
 
 Return a (preferably unique) number that represents this bel. This is used in design state checksum calculations.
 
-*BaseArch default: returns `std::hash` of `BelId` cast to `uint32_t`*
+*BaseArch default: returns `bel.hash()`*
 
 ### void bindBel(BelId bel, CellInfo \*cell, PlaceStrength strength)
 
@@ -272,11 +276,11 @@ unused. An implementation may simply return an empty range.
 
 Return a (preferably unique) number that represents this wire. This is used in design state checksum calculations.
 
-*BaseArch default: returns `std::hash` of `WireId` cast to `uint32_t`*
+*BaseArch default: returns `wire.hash()`*
 
 ### void bindWire(WireId wire, NetInfo \*net, PlaceStrength strength)
 
-Bind a wire to a net. This method must be used when binding a wire that is driven by a bel pin. Use `binPip()`
+Bind a wire to a net. This method must be used when binding a wire that is driven by a bel pin. Use `bindPip()`
 when binding a wire that is driven by a pip.
 
 This method must also update `net->wires`.
@@ -329,12 +333,20 @@ Get a list of all wires on the device.
 
 Get a list of all bel pins attached to a given wire.
 
-### ArcBounds getRouteBoundingBox(WireId src, WireId dst) const
+### BoundingBox getRouteBoundingBox(WireId src, WireId dst) const
 
 Get the bounding box required to route an arc, assuming an uncongested
 chip. There may be significant performance impacts if routing regularly
 exceeds these bounds by more than a small margin; so an over-estimate
 of the bounds is almost always better than an under-estimate.
+
+### IdString getWireConstantValue() const
+
+If not an empty string, indicate this wire can be used to source nets
+with their `constant_value` equal to its return value.
+
+*BaseArch default: returns `IdString()`*
+
 
 Pip Methods
 -----------
@@ -370,7 +382,7 @@ for pips a X/Y/Z location refers to a group of pips, not an individual pip.
 
 Return a (preferably unique) number that represents this pip. This is used in design state checksum calculations.
 
-*BaseArch default: returns `std::hash` of `WireId` cast to `uint32_t`*
+*BaseArch default: returns `pip.hash()`*
 
 ### void bindPip(PipId pip, NetInfo \*net, PlaceStrength strength)
 
@@ -398,12 +410,18 @@ pip to a net.
 
 *BaseArch default: returns `getBoundPipNet(pip) == nullptr`*
 
-### bool checkPipAvailForNet(PipId pip, NetInfo *net) const
+### bool checkPipAvailForNet(PipId pip, const NetInfo *net) const
 
 Returns true if the given pip is available to be bound to a net, or if the
 pip is already bound to that net.
 
 *BaseArch default: returns `getBoundPipNet(pip) == nullptr || getBoundPipNet(pip) == net`*
+
+### bool isPipInverting(PipId pip) const
+
+Returns true if the given pip inverts the net passing through it.
+
+*BaseArch default: returns `false`*
 
 ### NetInfo \*getBoundPipNet(PipId pip) const
 
@@ -513,7 +531,7 @@ result, and for that estimate it is considered more acceptable to return a
 slightly too high result and it is considered less acceptable to return a
 too low result (thus "low upper bound").
 
-### delay\_t predictDelay(const NetInfo \*net\_info, const PortRef &sink) const
+### delay\_t predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const
 
 Return a reasonably good estimate for the total `maxDelay()` delay for the
 given arc. This should return a low upper bound for the fastest route for that arc.
@@ -541,9 +559,11 @@ Convert a real-world delay in nanoseconds to a `delay_t`.
 
 Convert a `delay_t` to an integer for checksum calculations.
 
-### bool getBudgetOverride(const NetInfo \*net\_info, const PortRef &sink, delay\_t &budget) const
+### bool getArcDelayOverride(const NetInfo \*net_info, const PortRef &sink, DelayQuad &delay) const
 
-Overwrite or modify (in-place) the timing budget for a given arc. Returns a bool to indicate whether this was done.
+This allows an arch to provide a more precise method for calculating the delay for a routed arc than
+summing wire and pip delays; for example a SPICE simulation. If available, `delay` should be set and
+`true` returned.
 
 *BaseArch default: returns false*
 
@@ -565,7 +585,7 @@ run the router.
 Graphics Methods
 ----------------
 
-###DecalGfxRangeT getDecalGraphics(DecalId decal) const
+### DecalGfxRangeT getDecalGraphics(DecalId decal) const
 
 Return the graphic elements that make up a decal.
 
@@ -694,10 +714,14 @@ return the same value regardless if other cells are placed within the fabric.
 
 *BaseArch default: returns `cell_type == getBelType(bel)`*
 
-### bool isBelLocationValid(BelId bel) const
+### bool isBelLocationValid(BelId bel, bool explain_invalid = false) const
 
 Returns true if a bel in the current configuration is legal (for example,
 a flipflop's clock signal is correctly shared with all bels in a slice.)
+
+If and only if `explain_invalid` is set to true, then a message using
+`log_nonfatal_error` should be printed explaining why the placement is invalid
+to the end user.
 
 *BaseArch default: returns true*
 
@@ -720,3 +744,62 @@ Name of the default router algorithm for the architecture, if
 
 Name of available router algorithms for the architecture, used
 to provide help for and validate `--router`.
+
+Cluster Methods
+---------------
+
+### CellInfo *getClusterRootCell(ClusterId cluster) const
+
+Gets the root cell of a cluster, which is used as a datum point when placing the cluster.
+
+### BoundingBox getClusterBounds(ClusterId cluster) const
+
+Gets an approximate bounding box of the cluster. This is intended for area allocation in the placer and is permitted to occasionally give incorrect estimates, for example due to irregularities in the fabric depending on cluster placement. `getClusterPlacement` should always be used to get exact locations.
+
+### Loc getClusterOffset(const CellInfo \*cell) const
+
+Gets the approximate offset of a cell within its cluster, relative to the root cell. This is intended for global placement usage and is permitted to occasionally give incorrect estimates, for example due to irregularities in the fabric depending on cluster placement. `getClusterPlacement` should always be used to get exact locations.
+
+The returned x and y coordinates, when added to the root location of the cluster, should give an approximate location where `cell` will end up placed at.
+
+### bool isClusterStrict(const CellInfo *cell) const
+
+Returns `true` if the cell **must** be placed according to the cluster; for example typical carry chains, and dedicated IO routing. Returns `false` if the cell can be split from the cluster if placement desires, at the expense of a less optimal result (for example dedicated LUT-FF paths where general routing can also be used).
+
+### bool getClusterPlacement(ClusterId cluster, BelId root\_bel, std::vector\<std::pair\<CellInfo \*, BelId\>\> &placement) const
+
+Gets an exact placement of the cluster, with the root cell placed on or near `root_bel` (and always within the same tile). Returns false if no placement is viable, otherwise returns `true` and populates `placement` with a list of cells inside the cluster and bels they should be placed at.
+
+This approach of allowing architectures to define cluster placements enables easier handling of irregular fabrics than requiring strict and constant x, y and z offsets.
+
+Router Methods
+---------------
+
+### void expandBoundingBox(BoundingBox &bb) const
+
+As part of `router2` implementation, during congestion update, every third time a net fails to route, this method is executed to expand the bounding box to increase the search space.
+
+Default implementation expands by one tile in each direction.
+
+Resource Methods
+---------------
+
+Some architectures may have shared resources across pips, e.g. a single bitstream bit controls multiple multiplexers. To produce legal output, these resource APIs can be used to ensure resource "keys" have "values" that agree across pips. Note that a pip has zero or one resource keys, so if a shared resource requires multiple keys, it must have multiple pips in series.
+
+### GroupId getResourceKeyForPip(PipId pip) const
+
+Returns the resource key for given pip, or `GroupId()` if a pip has no resource key.
+
+*BaseArch default: returns `GroupId()`*
+
+### int getResourceValueForPip(PipId pip) const
+
+Returns the resource value for given pip, or `0` if a pip has no resource key.
+
+*BaseArch default: returns `0`*
+
+### bool isGroupResource(GroupId group) const
+
+Returns `true` if `group` represents a resource.
+
+*BaseArch default: returns `false`*

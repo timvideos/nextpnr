@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -58,8 +58,8 @@ class BaseMainWindow : public QMainWindow
     void disableActions();
     void enableDisableDecals();
 
-    virtual void onDisableActions(){};
-    virtual void onUpdateActions(){};
+    virtual void onDisableActions() {};
+    virtual void onUpdateActions() {};
 
   protected Q_SLOTS:
     void writeInfo(std::string text);
@@ -69,13 +69,11 @@ class BaseMainWindow : public QMainWindow
 
     void open_json();
     void save_json();
-    void budget();
     void place();
 
     void execute_python();
 
     void pack_finished(bool status);
-    void budget_finish(bool status);
     void place_finished(bool status);
     void route_finished(bool status);
 
@@ -86,6 +84,8 @@ class BaseMainWindow : public QMainWindow
     void screenshot();
     void saveMovie();
     void saveSVG();
+
+    void about();
 
   Q_SIGNALS:
     void contextChanged(Context *ctx);
@@ -118,7 +118,6 @@ class BaseMainWindow : public QMainWindow
     QAction *actionSaveJSON;
 
     QAction *actionPack;
-    QAction *actionAssignBudget;
     QAction *actionPlace;
     QAction *actionRoute;
 

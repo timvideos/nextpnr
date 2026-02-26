@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -62,7 +62,7 @@ void ice40DelayFuzzerMain(Context *ctx)
 
         WireId src = srcWires[index];
         WireId dst = dstWires[index++];
-        std::unordered_map<WireId, PipId> route;
+        dict<WireId, PipId> route;
 
 #if NUM_FUZZ_ROUTES <= 1000
         if (!ctx->getActualRouteDelay(src, dst, nullptr, &route, false))
@@ -188,13 +188,13 @@ delay_t Arch::estimateDelay(WireId src, WireId dst) const
     return v;
 }
 
-delay_t Arch::predictDelay(const NetInfo *net_info, const PortRef &sink) const
+delay_t Arch::predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const
 {
-    const auto &driver = net_info->driver;
-    auto driver_loc = getBelLocation(driver.cell->bel);
-    auto sink_loc = getBelLocation(sink.cell->bel);
+    NPNR_UNUSED(dst_pin);
+    auto driver_loc = getBelLocation(src_bel);
+    auto sink_loc = getBelLocation(dst_bel);
 
-    if (driver.port == id_COUT) {
+    if (src_pin == id_COUT) {
         if (driver_loc.y == sink_loc.y)
             return 0;
         return 250;

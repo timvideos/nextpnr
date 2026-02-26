@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -48,7 +48,7 @@ void IdString::initialize_arch(const BaseCtx *ctx)
 Arch::Arch(ArchArgs args) : args(args)
 {
     // Parse device string
-    if (boost::starts_with(args.device, "LIFCL")) {
+    if (boost::starts_with(args.device, "LIFCL") || boost::starts_with(args.device, "LFD2NX")) {
         family = "LIFCL";
     } else {
         log_error("Unknown device string '%s' (expected device name like 'LIFCL-40-8SG72C')\n", args.device.c_str());
@@ -58,7 +58,9 @@ Arch::Arch(ArchArgs args) : args(args)
         log_error("Unknown device string '%s' (expected device name like 'LIFCL-40-8SG72C')\n", args.device.c_str());
     device = args.device.substr(0, last_sep);
     speed = args.device.substr(last_sep + 1, 1);
-    auto package_end = args.device.find_last_of("0123456789");
+    auto package_end = args.device.find_last_of("0123456789", args.device.substr(args.device.size() - 3) == "ES2"
+                                                                      ? args.device.size() - 3
+                                                                      : std::string::npos);
     if (package_end == std::string::npos || package_end < last_sep)
         log_error("Unknown device string '%s' (expected device name like 'LIFCL-40-8SG72C')\n", args.device.c_str());
     package = args.device.substr(last_sep + 2, (package_end - (last_sep + 2)) + 1);
@@ -67,6 +69,9 @@ Arch::Arch(ArchArgs args) : args(args)
     // Check for 'ES' part
     if (rating.size() > 1 && rating.substr(1) == "ES") {
         variant = "ES";
+    } else if (rating.size() > 1 && rating.substr(1) == "ES2") {
+        // ES2 devices are production-equivalent from nextpnr's and bitstream point of view
+        variant = "";
     } else {
         variant = "";
     }
@@ -119,15 +124,18 @@ Arch::Arch(ArchArgs args) : args(args)
             ts.bels_by_z[bel.z].tile = i;
             ts.bels_by_z[bel.z].index = j;
         }
+        auto &ts = tileStatus.at(i);
+        ts.boundwires.resize(loc.wires.size());
+        ts.boundpips.resize(loc.pips.size());
     }
 
     for (int i = 0; i < chip_info->width; i++) {
-        IdString x_id = id(stringf("X%d", i));
+        IdString x_id = idf("X%d", i);
         x_ids.push_back(x_id);
         id_to_x[x_id] = i;
     }
     for (int i = 0; i < chip_info->height; i++) {
-        IdString y_id = id(stringf("Y%d", i));
+        IdString y_id = idf("Y%d", i);
         y_ids.push_back(y_id);
         id_to_y[y_id] = i;
     }
@@ -171,6 +179,60 @@ Arch::Arch(ArchArgs args) : args(args)
 
     BaseArch::init_cell_types();
     BaseArch::init_bel_buckets();
+
+    if (device == "LIFCL-17") {
+        for (BelId bel : getBelsByTile(37, 10)) {
+            // These pips currently don't work, due to routing differences between the variants that the DB format needs
+            // some tweaks to accomodate properly
+            if (getBelType(bel) != id_DCC)
+                continue;
+            WireId w = getBelPinWire(bel, id_CLKI);
+            for (auto pip : getPipsUphill(w))
+                disabled_pips.insert(pip);
+        }
+        // TODO: find a better solution to disable these
+        WireId dcs_out =
+                getWireByName(IdStringList(std::array<IdString, 3>{x_ids.at(37), y_ids.at(10), id_JDCSOUT_DCS_DCSIP}));
+        for (auto dcs_pip : getPipsUphill(dcs_out))
+            disabled_pips.insert(dcs_pip);
+        NPNR_ASSERT(disabled_pips.size() == 6);
+    }
+    if (device == "LIFCL-40") {
+        WireId dcs_out =
+                getWireByName(IdStringList(std::array<IdString, 3>{x_ids.at(49), y_ids.at(28), id_JDCSOUT_DCS_DCSIP}));
+        for (auto dcs_pip : getPipsUphill(dcs_out))
+            disabled_pips.insert(dcs_pip);
+        NPNR_ASSERT(disabled_pips.size() == 2);
+    }
+}
+
+void Arch::list_devices()
+{
+    std::vector<std::string> families{
+            "LIFCL",
+    };
+    log("Supported devices: \n");
+    for (auto fam : families) {
+        std::string chipdb = stringf("nexus/chipdb-%s.bin", fam.c_str());
+        auto db_ptr = reinterpret_cast<const RelPtr<DatabasePOD> *>(get_chipdb(chipdb));
+        if (!db_ptr)
+            continue; // chipdb not available
+        // enumerate chips
+        for (auto &chip : db_ptr->get()->chips) {
+            // enumerate packages
+            for (auto &pkg : chip.packages) {
+                // enumerate suffices
+                for (auto speedgrade : {"7", "8", "9"}) { // TODO: these might depend on family
+                    for (auto rating : {"I", "C"}) {
+                        for (auto suffix : {"", "ES", "ES2"}) {
+                            log("    %s-%s%s%s%s\n", chip.device_name.get(), speedgrade, pkg.short_name.get(), rating,
+                                suffix);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -279,13 +341,13 @@ std::vector<std::pair<IdString, std::string>> Arch::getBelAttrs(BelId bel) const
 {
     std::vector<std::pair<IdString, std::string>> ret;
 
-    ret.emplace_back(id("INDEX"), stringf("%d", bel.index));
+    ret.emplace_back(id_INDEX, stringf("%d", bel.index));
 
-    ret.emplace_back(id("GRID_X"), stringf("%d", bel.tile % chip_info->width));
-    ret.emplace_back(id("GRID_Y"), stringf("%d", bel.tile / chip_info->width));
-    ret.emplace_back(id("BEL_Z"), stringf("%d", bel_data(bel).z));
+    ret.emplace_back(id_GRID_X, stringf("%d", bel.tile % chip_info->width));
+    ret.emplace_back(id_GRID_Y, stringf("%d", bel.tile / chip_info->width));
+    ret.emplace_back(id_BEL_Z, stringf("%d", bel_data(bel).z));
 
-    ret.emplace_back(id("BEL_TYPE"), nameOf(getBelType(bel)));
+    ret.emplace_back(id_BEL_TYPE, nameOf(getBelType(bel)));
 
     return ret;
 }
@@ -316,13 +378,24 @@ std::vector<std::pair<IdString, std::string>> Arch::getWireAttrs(WireId wire) co
 {
     std::vector<std::pair<IdString, std::string>> ret;
 
-    ret.emplace_back(id("INDEX"), stringf("%d", wire.index));
+    ret.emplace_back(id_INDEX, stringf("%d", wire.index));
 
-    ret.emplace_back(id("GRID_X"), stringf("%d", wire.tile % chip_info->width));
-    ret.emplace_back(id("GRID_Y"), stringf("%d", wire.tile / chip_info->width));
-    ret.emplace_back(id("FLAGS"), stringf("%u", wire_data(wire).flags));
+    ret.emplace_back(id_GRID_X, stringf("%d", wire.tile % chip_info->width));
+    ret.emplace_back(id_GRID_Y, stringf("%d", wire.tile / chip_info->width));
+    ret.emplace_back(id_FLAGS, stringf("%u", wire_data(wire).flags));
 
     return ret;
+}
+
+IdString Arch::getWireType(WireId wire) const
+{
+    IdString basename(wire_data(wire).name);
+    const std::string &basename_str = basename.str(this);
+    // Interconnect - derive a type
+    if ((basename_str[0] == 'H' || basename_str[0] == 'V') && basename_str[1] == '0')
+        return id(basename_str.substr(0, 4));
+    else
+        return id_GENERAL;
 }
 
 // -----------------------------------------------------------------------
@@ -345,7 +418,7 @@ IdStringList Arch::getPipName(PipId pip) const
 {
     NPNR_ASSERT(pip != PipId());
     std::array<IdString, 5> ids{x_ids.at(pip.tile % chip_info->width), y_ids.at(pip.tile / chip_info->width),
-                                id(stringf("%d", pip.index)), IdString(loc_data(pip).wires[pip_data(pip).to_wire].name),
+                                idf("%d", pip.index), IdString(loc_data(pip).wires[pip_data(pip).to_wire].name),
                                 IdString(loc_data(pip).wires[pip_data(pip).from_wire].name)};
     return IdStringList(ids);
 }
@@ -356,13 +429,13 @@ std::vector<std::pair<IdString, std::string>> Arch::getPipAttrs(PipId pip) const
 {
     std::vector<std::pair<IdString, std::string>> ret;
 
-    ret.emplace_back(id("INDEX"), stringf("%d", pip.index));
+    ret.emplace_back(id_INDEX, stringf("%d", pip.index));
 
-    ret.emplace_back(id("GRID_X"), stringf("%d", pip.tile % chip_info->width));
-    ret.emplace_back(id("GRID_Y"), stringf("%d", pip.tile / chip_info->width));
+    ret.emplace_back(id_GRID_X, stringf("%d", pip.tile % chip_info->width));
+    ret.emplace_back(id_GRID_Y, stringf("%d", pip.tile / chip_info->width));
 
-    ret.emplace_back(id("FROM_TILE_WIRE"), nameOf(IdString(loc_data(pip).wires[pip_data(pip).from_wire].name)));
-    ret.emplace_back(id("TO_TILE_WIRE"), nameOf(IdString(loc_data(pip).wires[pip_data(pip).to_wire].name)));
+    ret.emplace_back(id_FROM_TILE_WIRE, nameOf(IdString(loc_data(pip).wires[pip_data(pip).from_wire].name)));
+    ret.emplace_back(id_TO_TILE_WIRE, nameOf(IdString(loc_data(pip).wires[pip_data(pip).to_wire].name)));
 
     return ret;
 }
@@ -447,13 +520,28 @@ bool Arch::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort
             }
             return result;
         } else {
-            if (toPort == id_F || toPort == id_OFX)
+            if (toPort.in(id_F, id_OFX))
                 return lookup_cell_delay(cell->tmg_index, fromPort, toPort, delay);
         }
     } else if (is_dsp_cell(cell)) {
         if (fromPort == id_CLK)
             return false; // don't include delays that are actually clock-to-out here
         return lookup_cell_delay(cell->tmg_index, lookup_port(fromPort), lookup_port(toPort), delay);
+    } else if (cell->type == id_DCS) {
+        if (fromPort.in(id_SELFORCE, id_SEL)) {
+            return false;
+        }
+        int index = get_cell_timing_idx(id_DCS, id_DCS);
+        return lookup_cell_delay(index, fromPort, toPort, delay);
+    } else if (cell->type == id_DCC) {
+        if (fromPort == id_CLKI && toPort == id_CLKO) {
+            // TODO: Use actual DCC delays
+            delay.rise.min_delay = 1;
+            delay.rise.max_delay = 1;
+            delay.fall.min_delay = 1;
+            delay.fall.max_delay = 1;
+            return true;
+        }
     }
     return false;
 }
@@ -467,10 +555,9 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
     };
     clockInfoCount = 0;
     if (cell->type == id_OXIDE_COMB) {
-        if (port == id_A || port == id_B || port == id_C || port == id_D || port == id_SEL || port == id_F1 ||
-            port == id_FCI || port == id_WDI)
+        if (port.in(id_A, id_B, id_C, id_D, id_SEL, id_F1, id_FCI, id_WDI))
             return TMG_COMB_INPUT;
-        if (port == id_F || port == id_OFX || port == id_FCO) {
+        if (port.in(id_F, id_OFX, id_FCO)) {
             if (disconnected(id_A) && disconnected(id_B) && disconnected(id_C) && disconnected(id_D) &&
                 disconnected(id_FCI) && disconnected(id_SEL) && disconnected(id_WDI))
                 return TMG_IGNORE;
@@ -490,30 +577,52 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
     } else if (cell->type == id_RAMW) {
         if (port == id_CLK)
             return TMG_CLOCK_INPUT;
-        else if (port == id_WDO0 || port == id_WDO1 || port == id_WDO2 || port == id_WDO3) {
+        else if (port.in(id_WDO0, id_WDO1, id_WDO2, id_WDO3)) {
             clockInfoCount = 1;
             return TMG_REGISTER_OUTPUT;
-        } else if (port == id_A0 || port == id_A1 || port == id_B0 || port == id_B1 || port == id_C0 || port == id_C1 ||
-                   port == id_D0 || port == id_D1) {
+        } else if (port.in(id_A0, id_A1, id_B0, id_B1, id_C0, id_C1, id_D0, id_D1)) {
             clockInfoCount = 1;
             return TMG_REGISTER_INPUT;
         }
     } else if (cell->type == id_OXIDE_EBR) {
-        if (port == id_DWS0 || port == id_DWS1 || port == id_DWS2 || port == id_DWS3 || port == id_DWS4)
+        if (port.in(id_DWS0, id_DWS1, id_DWS2, id_DWS3, id_DWS4))
             return TMG_IGNORE;
-        if (port == id_CLKA || port == id_CLKB)
+        if (port.in(id_CLKA, id_CLKB))
             return TMG_CLOCK_INPUT;
         clockInfoCount = 1;
         return (cell->ports.at(port).type == PORT_IN) ? TMG_REGISTER_INPUT : TMG_REGISTER_OUTPUT;
-    } else if (cell->type == id_MULT18_CORE || cell->type == id_MULT18X36_CORE || cell->type == id_MULT36_CORE) {
+    } else if (cell->type == id_LRAM_CORE) {
+        if (port.in(id_OPCGLDCK, id_OPCGLOADCLK, id_SCANCLK, id_SCANRST, id_TBISTN, id_INITN, id_STDBYN, id_IGN,
+                    id_DPS))
+            return TMG_IGNORE;
+        if (port == id_CLK)
+            return TMG_CLOCK_INPUT;
+        clockInfoCount = 1;
+        return (cell->ports.at(port).type == PORT_IN) ? TMG_REGISTER_INPUT : TMG_REGISTER_OUTPUT;
+    } else if (cell->type.in(id_MULT18_CORE, id_MULT18X36_CORE, id_MULT36_CORE)) {
         return (cell->ports.at(port).type == PORT_IN) ? TMG_COMB_INPUT : TMG_COMB_OUTPUT;
-    } else if (cell->type == id_PREADD9_CORE || cell->type == id_REG18_CORE || cell->type == id_MULT9_CORE) {
+    } else if (cell->type.in(id_PREADD9_CORE, id_REG18_CORE, id_MULT9_CORE)) {
         if (port == id_CLK)
             return TMG_CLOCK_INPUT;
         auto type = lookup_port_type(cell->tmg_index, lookup_port(port), cell->ports.at(port).type, id_CLK);
         if (type == TMG_REGISTER_INPUT || type == TMG_REGISTER_OUTPUT)
             clockInfoCount = 1;
         return type;
+    } else if (cell->type == id_DCC) {
+        if (port == id_CLKI)
+            return TMG_COMB_INPUT;
+        else if (port == id_CLKO)
+            return TMG_COMB_OUTPUT;
+    } else if (cell->type == id_DCS) {
+        // FIXME: Making inputs TMG_CLOCK_INPUT and the output TMG_CLOCK_GEN
+        // yielded in error in the timing analyzer. For now keep those as
+        // regular combinational ports.
+        if (port.in(id_CLK0, id_CLK1))
+            return TMG_COMB_INPUT;
+        else if (port == id_DCSOUT) {
+            return TMG_COMB_OUTPUT;
+        }
+        return TMG_IGNORE;
     }
     return TMG_IGNORE;
 }
@@ -535,7 +644,7 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
     } else if (cell->type == id_RAMW) {
         info.edge = (cell->ffInfo.ctrlset.clkmux == ID_INV) ? FALLING_EDGE : RISING_EDGE;
         info.clock_port = id_CLK;
-        if (port == id_WDO0 || port == id_WDO1 || port == id_WDO2 || port == id_WDO3)
+        if (port.in(id_WDO0, id_WDO1, id_WDO2, id_WDO3))
             NPNR_ASSERT(lookup_cell_delay(cell->tmg_index, id_CLK, port, info.clockToQ));
         else
             lookup_cell_setuphold(cell->tmg_index, port, id_CLK, info.setup, info.hold);
@@ -547,7 +656,15 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
         }
         // Lookup edge based on inversion
         info.edge = (get_cell_pinmux(cell, info.clock_port) == PINMUX_INV) ? FALLING_EDGE : RISING_EDGE;
-    } else if (cell->type == id_PREADD9_CORE || cell->type == id_REG18_CORE || cell->type == id_MULT9_CORE) {
+    } else if (cell->type == id_LRAM_CORE) {
+        info.clock_port = id_CLK;
+        if (cell->ports.at(port).type == PORT_IN) {
+            lookup_cell_setuphold(cell->tmg_index, lookup_port(port), id_CLK, info.setup, info.hold);
+        } else {
+            NPNR_ASSERT(lookup_cell_delay(cell->tmg_index, id_CLK, lookup_port(port), info.clockToQ));
+        }
+        info.edge = (get_cell_pinmux(cell, info.clock_port) == PINMUX_INV) ? FALLING_EDGE : RISING_EDGE;
+    } else if (cell->type.in(id_PREADD9_CORE, id_REG18_CORE, id_MULT9_CORE)) {
         info.clock_port = id_CLK;
         if (cell->ports.at(port).type == PORT_IN) {
             lookup_cell_setuphold(cell->tmg_index, lookup_port(port), id_CLK, info.setup, info.hold);
@@ -563,34 +680,36 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
 
 // -----------------------------------------------------------------------
 
+delay_t Arch::getRipupDelayPenalty() const { return 250; }
+
 delay_t Arch::estimateDelay(WireId src, WireId dst) const
 {
+    const auto &dst_data = wire_data(dst);
+    if (src.tile == 0 && dst_data.name == ID_LOCAL_VCC)
+        return 0;
     int src_x = src.tile % chip_info->width, src_y = src.tile / chip_info->width;
     int dst_x = dst.tile % chip_info->width, dst_y = dst.tile / chip_info->width;
     int dist_x = std::abs(src_x - dst_x);
     int dist_y = std::abs(src_y - dst_y);
-    return 75 * dist_x + 75 * dist_y + 200;
-}
-delay_t Arch::predictDelay(const NetInfo *net_info, const PortRef &sink) const
-{
-    if (net_info->driver.cell == nullptr || net_info->driver.cell->bel == BelId() || sink.cell->bel == BelId())
-        return 0;
-    if (sink.port == id_FCI)
-        return 0;
-    int src_x = net_info->driver.cell->bel.tile % chip_info->width,
-        src_y = net_info->driver.cell->bel.tile / chip_info->width;
 
-    int dst_x = sink.cell->bel.tile % chip_info->width, dst_y = sink.cell->bel.tile / chip_info->width;
+    return estimate_delay_mult * (dist_x + dist_y) + 250;
+}
+delay_t Arch::predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const
+{
+    NPNR_UNUSED(src_pin);
+    if (dst_pin == id_FCI)
+        return 0;
+    int src_x = src_bel.tile % chip_info->width, src_y = src_bel.tile / chip_info->width;
+
+    int dst_x = dst_bel.tile % chip_info->width, dst_y = dst_bel.tile / chip_info->width;
     int dist_x = std::abs(src_x - dst_x);
     int dist_y = std::abs(src_y - dst_y);
     return 100 * dist_x + 100 * dist_y + 250;
 }
 
-bool Arch::getBudgetOverride(const NetInfo *net_info, const PortRef &sink, delay_t &budget) const { return false; }
-
-ArcBounds Arch::getRouteBoundingBox(WireId src, WireId dst) const
+BoundingBox Arch::getRouteBoundingBox(WireId src, WireId dst) const
 {
-    ArcBounds bb;
+    BoundingBox bb;
 
     int src_x = src.tile % chip_info->width, src_y = src.tile / chip_info->width;
     int dst_x = dst.tile % chip_info->width, dst_y = dst.tile / chip_info->width;
@@ -625,7 +744,11 @@ ArcBounds Arch::getRouteBoundingBox(WireId src, WireId dst) const
 
 bool Arch::place()
 {
-    std::string placer = str_or_default(settings, id("placer"), defaultPlacer);
+    estimate_delay_mult = 75;
+    if (getCtx()->settings.count(getCtx()->id("estimate-delay-mult")))
+        estimate_delay_mult = getCtx()->setting<int>("estimate-delay-mult");
+
+    std::string placer = str_or_default(settings, id_placer, defaultPlacer);
 
     if (placer == "heap") {
         PlacerHeapCfg cfg(getCtx());
@@ -649,26 +772,25 @@ bool Arch::place()
 
     post_place_opt();
 
-    getCtx()->attrs[getCtx()->id("step")] = std::string("place");
+    getCtx()->attrs[id_step] = std::string("place");
     archInfoToAttributes();
     return true;
 }
 
 void Arch::pre_routing()
 {
-    for (auto cell : sorted(cells)) {
-        CellInfo *ci = cell.second;
-        if (ci->type == id_MULT9_CORE || ci->type == id_PREADD9_CORE || ci->type == id_MULT18_CORE ||
-            ci->type == id_MULT18X36_CORE || ci->type == id_MULT36_CORE || ci->type == id_REG18_CORE ||
-            ci->type == id_ACC54_CORE) {
-            for (auto port : sorted_ref(ci->ports)) {
+    for (auto &cell : cells) {
+        CellInfo *ci = cell.second.get();
+        if (ci->type.in(id_MULT9_CORE, id_PREADD9_CORE, id_MULT18_CORE, id_MULT18X36_CORE, id_MULT36_CORE,
+                        id_REG18_CORE, id_ACC54_CORE)) {
+            for (auto &port : ci->ports) {
                 WireId wire = getBelPinWire(ci->bel, port.first);
                 if (wire != WireId())
                     dsp_wires.insert(wire);
             }
         }
         if (ci->type == id_LRAM_CORE) {
-            for (auto port : sorted_ref(ci->ports)) {
+            for (auto &port : ci->ports) {
                 WireId wire = getBelPinWire(ci->bel, port.first);
                 if (wire != WireId())
                     lram_wires.insert(wire);
@@ -676,26 +798,41 @@ void Arch::pre_routing()
         }
     }
 }
+namespace {
+float router2_base_cost(Context *ctx, WireId wire, PipId pip, float crit_weight)
+{
+    (void)crit_weight; // unused
+    if (pip != PipId()) {
+        auto &data = ctx->pip_data(pip);
+        if (data.flags & PIP_ZERO_RR_COST)
+            return 1e-12;
+        if (data.flags & PIP_DRMUX_C)
+            return 1e15;
+    }
+    return ctx->getDelayNS(ctx->getPipDelay(pip).maxDelay() + ctx->getWireDelay(wire).maxDelay() +
+                           ctx->getDelayEpsilon());
+}
+} // namespace
 
 bool Arch::route()
 {
-    assign_budget(getCtx(), true);
-
     pre_routing();
 
     route_globals();
 
-    std::string router = str_or_default(settings, id("router"), defaultRouter);
+    std::string router = str_or_default(settings, id_router, defaultRouter);
     bool result;
     if (router == "router1") {
         result = router1(getCtx(), Router1Cfg(getCtx()));
     } else if (router == "router2") {
-        router2(getCtx(), Router2Cfg(getCtx()));
+        Router2Cfg cfg(getCtx());
+        cfg.get_base_cost = router2_base_cost;
+        router2(getCtx(), cfg);
         result = true;
     } else {
         log_error("Nexus architecture does not support router '%s'\n", router.c_str());
     }
-    getCtx()->attrs[getCtx()->id("step")] = std::string("route");
+    getCtx()->attrs[id_step] = std::string("route");
     archInfoToAttributes();
     return result;
 }
@@ -704,7 +841,7 @@ bool Arch::route()
 
 CellPinMux Arch::get_cell_pinmux(const CellInfo *cell, IdString pin) const
 {
-    IdString param = id(stringf("%sMUX", pin.c_str(this)));
+    IdString param = idf("%sMUX", pin.c_str(this));
     auto fnd_param = cell->params.find(param);
     if (fnd_param == cell->params.end())
         return PINMUX_SIG;
@@ -725,7 +862,7 @@ CellPinMux Arch::get_cell_pinmux(const CellInfo *cell, IdString pin) const
 
 void Arch::set_cell_pinmux(CellInfo *cell, IdString pin, CellPinMux state)
 {
-    IdString param = id(stringf("%sMUX", pin.c_str(this)));
+    IdString param = idf("%sMUX", pin.c_str(this));
     switch (state) {
     case PINMUX_SIG:
         cell->params.erase(param);
@@ -857,8 +994,8 @@ int db_binary_search(const Tres *list, int count, Tgetter key_getter, Tkey key)
 
 bool Arch::is_dsp_cell(const CellInfo *cell) const
 {
-    return cell->type == id_MULT18_CORE || cell->type == id_MULT18X36_CORE || cell->type == id_MULT36_CORE ||
-           cell->type == id_PREADD9_CORE || cell->type == id_REG18_CORE || cell->type == id_MULT9_CORE;
+    return cell->type.in(id_MULT18_CORE, id_MULT18X36_CORE, id_MULT36_CORE, id_PREADD9_CORE, id_REG18_CORE,
+                         id_MULT9_CORE);
 }
 
 int Arch::get_cell_timing_idx(IdString cell_type, IdString cell_variant) const
@@ -943,21 +1080,54 @@ TimingPortClass Arch::lookup_port_type(int type_idx, IdString port, PortType dir
         return lookup_cell_delay(type_idx, clock, port, dly) ? TMG_REGISTER_OUTPUT : TMG_COMB_OUTPUT;
     }
 }
+// -----------------------------------------------------------------------
+
+bool Arch::getClusterPlacement(ClusterId cluster, BelId root_bel,
+                               std::vector<std::pair<CellInfo *, BelId>> &placement) const
+{
+    CellInfo *root_cell = cells.at(cluster).get();
+    placement.clear();
+    NPNR_ASSERT(root_bel != BelId());
+    Loc root_loc = getBelLocation(root_bel);
+
+    if (root_cell->constr_abs_z) {
+        // Coerce root to absolute z constraint
+        root_loc.z = root_cell->constr_z;
+        root_bel = getBelByLocation(root_loc);
+        if (root_bel == BelId() || !isValidBelForCellType(root_cell->type, root_bel))
+            return false;
+    }
+    placement.emplace_back(root_cell, root_bel);
+
+    for (auto child : root_cell->constr_children) {
+        Loc child_loc;
+        child_loc.x = root_loc.x + child->constr_x;
+        child_loc.y = root_loc.y + child->constr_y;
+        child_loc.z = child->constr_abs_z ? child->constr_z : (root_loc.z + child->constr_z);
+        BelId child_bel = getBelByLocation(child_loc);
+        if (child_bel == BelId() || !isValidBelForCellType(child->type, child_bel)) {
+            // Special case for DSPs where the delta is sometimes different
+            bool fixed = false;
+            if (child->type == id_REG18_CORE && root_cell->is_9x9_18x18) {
+                child_loc.x -= 1;
+                child_loc.z += 2;
+                child_bel = getBelByLocation(child_loc);
+                if (child_bel != BelId() && isValidBelForCellType(child->type, child_bel))
+                    fixed = true;
+            }
+            if (!fixed)
+                return false;
+        }
+        placement.emplace_back(child, child_bel);
+    }
+    return true;
+}
 
 // -----------------------------------------------------------------------
 
-#ifdef WITH_HEAP
 const std::string Arch::defaultPlacer = "heap";
-#else
-const std::string Arch::defaultPlacer = "sa";
-#endif
 
-const std::vector<std::string> Arch::availablePlacers = {"sa",
-#ifdef WITH_HEAP
-                                                         "heap"
-#endif
-
-};
+const std::vector<std::string> Arch::availablePlacers = {"sa", "heap"};
 
 const std::string Arch::defaultRouter = "router2";
 const std::vector<std::string> Arch::availableRouters = {"router1", "router2"};

@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -116,7 +116,7 @@ template <typename CoordinateT, typename ElementT> class QuadTreeNode
     BoundingBox bound_;
     // How many elements should be contained in this node until it splits into
     // sub-nodes.
-    const size_t max_elems_;
+    size_t max_elems_;
     // Four sub-nodes or nullptr if it hasn't split yet.
     std::unique_ptr<QuadTreeNode<CoordinateT, ElementT>[]> children_ = nullptr;
     // Coordinates of the split.
@@ -226,7 +226,7 @@ template <typename CoordinateT, typename ElementT> class QuadTreeNode
             return *this;
         bound_ = other.bound_;
         max_elems_ = other.max_elems_;
-        children_ = other.max_children_;
+        // children_ = other.max_children_;
         children_ = other.children_;
         splitx_ = other.splitx_;
         splity_ = other.splity_;
@@ -264,20 +264,20 @@ template <typename CoordinateT, typename ElementT> class QuadTreeNode
             splitx_ = (bound_.x1_ - bound_.x0_) / 2 + bound_.x0_;
             splity_ = (bound_.y1_ - bound_.y0_) / 2 + bound_.y0_;
             // Create the new children.
-            children_ = decltype(children_)(new QuadTreeNode<CoordinateT, ElementT>[4] {
-                // Note: not using [NW] = QuadTreeNode because that seems to
-                //       crash g++ 7.3.0.
-                /* NW */ QuadTreeNode<CoordinateT, ElementT>(BoundingBox(bound_.x0_, bound_.y0_, splitx_, splity_),
-                                                             depth_ + 1, max_elems_),
-                        /* NE */
-                        QuadTreeNode<CoordinateT, ElementT>(BoundingBox(splitx_, bound_.y0_, bound_.x1_, splity_),
-                                                            depth_ + 1, max_elems_),
-                        /* SW */
-                        QuadTreeNode<CoordinateT, ElementT>(BoundingBox(bound_.x0_, splity_, splitx_, bound_.y1_),
-                                                            depth_ + 1, max_elems_),
-                        /* SE */
-                        QuadTreeNode<CoordinateT, ElementT>(BoundingBox(splitx_, splity_, bound_.x1_, bound_.y1_),
-                                                            depth_ + 1, max_elems_),
+            children_ = decltype(children_)(new QuadTreeNode<CoordinateT, ElementT>[4]{
+                    // Note: not using [NW] = QuadTreeNode because that seems to
+                    //       crash g++ 7.3.0.
+                    /* NW */ QuadTreeNode<CoordinateT, ElementT>(BoundingBox(bound_.x0_, bound_.y0_, splitx_, splity_),
+                                                                 depth_ + 1, max_elems_),
+                    /* NE */
+                    QuadTreeNode<CoordinateT, ElementT>(BoundingBox(splitx_, bound_.y0_, bound_.x1_, splity_),
+                                                        depth_ + 1, max_elems_),
+                    /* SW */
+                    QuadTreeNode<CoordinateT, ElementT>(BoundingBox(bound_.x0_, splity_, splitx_, bound_.y1_),
+                                                        depth_ + 1, max_elems_),
+                    /* SE */
+                    QuadTreeNode<CoordinateT, ElementT>(BoundingBox(splitx_, splity_, bound_.x1_, bound_.y1_),
+                                                        depth_ + 1, max_elems_),
             });
             // Move all elements to where they belong.
             auto it = elems_.begin();

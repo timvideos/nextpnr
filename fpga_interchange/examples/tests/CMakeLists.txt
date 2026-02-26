@@ -1,7 +1,0 @@
-add_subdirectory(wire)
-add_subdirectory(const_wire)
-add_subdirectory(counter)
-add_subdirectory(ram)
-add_subdirectory(ff)
-add_subdirectory(lut)
-add_subdirectory(lut_nexus)

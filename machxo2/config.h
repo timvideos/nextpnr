@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
  *  Copyright (C) 2021  William D. Jones <wjones@wdj-consulting.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -112,6 +112,7 @@ class ChipConfig
 {
   public:
     std::string chip_name;
+    std::string chip_variant;
     std::vector<std::string> metadata;
     std::map<std::string, TileConfig> tiles;
     std::vector<TileGroup> tilegroups;

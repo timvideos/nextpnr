@@ -1,0 +1,421 @@
+/*
+ *  nextpnr -- Next Generation Place and Route
+ *
+ *  Copyright (C) 2024  The Project Peppercorn Authors.
+ *
+ *  Permission to use, copy, modify, and/or distribute this software for any
+ *  purpose with or without fee is hereby granted, provided that the above
+ *  copyright notice and this permission notice appear in all copies.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ *  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ *  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ *  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ *  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ *  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ *  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ *
+ */
+
+#include <algorithm>
+#include <boost/algorithm/string.hpp>
+#include <boost/lexical_cast.hpp>
+#include <fstream>
+#include <regex>
+
+#include "extra_data.h"
+#include "himbaechel_api.h"
+#include "log.h"
+#include "nextpnr.h"
+#include "util.h"
+
+#include "gatemate.h"
+
+#define HIMBAECHEL_CONSTIDS "uarch/gatemate/constids.inc"
+#include "himbaechel_constids.h"
+
+NEXTPNR_NAMESPACE_BEGIN
+
+struct GateMateCCFReader
+{
+    Context *ctx;
+    GateMateImpl *uarch;
+    std::istream &in;
+    int lineno;
+    dict<IdString, Property> defaults;
+    std::vector<int> count;
+
+    GateMateCCFReader(Context *ctx, GateMateImpl *uarch, std::istream &in) : ctx(ctx), uarch(uarch), in(in){};
+
+    std::string strip_quotes(const std::string &str)
+    {
+        if (str.at(0) == '"') {
+            if (str.back() != '"') {
+                log_error("Expected '\"' at end of string '%s' (on line %d).\n", str.c_str(), lineno);
+            }
+            return str.substr(1, str.size() - 2);
+        } else {
+            return str;
+        }
+    };
+
+    void parse_params(std::vector<std::string> &params, bool is_default, dict<IdString, Property> *props)
+    {
+        for (auto param : params) {
+            std::vector<std::string> expr;
+            boost::split(expr, param, boost::is_any_of("="));
+            std::string name = expr.at(0);
+            boost::algorithm::trim(name);
+            boost::algorithm::to_upper(name);
+
+            if (expr.size() != 2) {
+                if (name == "LOC" || name == "DRIVE" || name == "DELAY_IBF" || name == "DELAY_OBF" || name == "DIE")
+                    log_error("Parameter must be in form NAME=VALUE (on line %d).\n", lineno);
+                log_warning("Parameter '%s' missing value, defaulting to '1' (on line %d).\n", name.c_str(), lineno);
+                expr.push_back("1");
+            }
+
+            std::string value = strip_quotes(expr.at(1));
+            boost::algorithm::trim(value);
+            boost::algorithm::to_upper(value);
+
+            if (name == "LOC") {
+                if (is_default)
+                    log_error("Value '%s' can not be defined for default GPIO in line %d.\n", name.c_str(), lineno);
+                if (ctx->get_package_pin_bel(ctx->id(value)) == BelId() && value != "SER_CLK" && value != "SER_CLK_N")
+                    log_error("Unknown location '%s' used in line %d.\n", value.c_str(), lineno);
+                if (!uarch->available_pads.count(ctx->id(value)))
+                    log_error("Pad '%s' used in line %d not available.\n", value.c_str(), lineno);
+                props->emplace(id_LOC, Property(value));
+                for (int i = 0; i < uarch->dies; i++) {
+                    if (uarch->locations.count(std::make_pair(ctx->id(value), i)))
+                        count[i]++;
+                    else
+                        count[i]--;
+                }
+                uarch->available_pads.erase(ctx->id(value));
+                // Erase aliases as well
+                if (value == "SER_CLK")
+                    uarch->available_pads.erase(ctx->id("SER_CLK_N"));
+                if (value == "SER_CLK_N")
+                    uarch->available_pads.erase(ctx->id("SER_CLK"));
+            } else if (name == "DIE") {
+                if (uarch->die_to_index.count(ctx->id(value))) {
+                    props->emplace(ctx->id(name), Property(value));
+                } else
+                    log_error("Unknown value '%s' for parameter '%s' in line %d.\n", value.c_str(), name.c_str(),
+                              lineno);
+            } else if (name == "SCHMITT_TRIGGER" || name == "PULLUP" || name == "PULLDOWN" || name == "KEEPER" ||
+                       name == "FF_IBF" || name == "FF_OBF" || name == "LVDS_BOOST" || name == "LVDS_RTERM") {
+                if (value == "1")
+                    value = "TRUE";
+                else if (value == "0")
+                    value = "FALSE";
+                if (value == "TRUE") {
+                    props->emplace(ctx->id(name), Property(Property::State::S1));
+                } else if (value == "FALSE") {
+                    props->emplace(ctx->id(name), Property(Property::State::S0));
+                } else
+                    log_error("Unknown value '%s' for parameter '%s' in line %d, must be TRUE or FALSE.\n",
+                              value.c_str(), name.c_str(), lineno);
+            } else if (name == "SLEW") {
+                if (value == "1" || value == "TRUE")
+                    value = "SLOW";
+                else if (value == "0" || value == "FALSE")
+                    value = "FAST";
+                if (value == "FAST" || value == "SLOW") {
+                    props->emplace(ctx->id(name), Property(value));
+                } else
+                    log_error("Unknown value '%s' for parameter '%s' in line %d, must be SLOW or FAST.\n",
+                              value.c_str(), name.c_str(), lineno);
+            } else if (name == "DRIVE") {
+                try {
+                    int drive = boost::lexical_cast<int>(value.c_str());
+                    if (drive == 3 || drive == 6 || drive == 9 || drive == 12) {
+                        props->emplace(ctx->id(name), Property(drive, 2));
+                    } else
+                        log_error("Parameter '%s' must have value 3,6,9 or 12 in line %d.\n", name.c_str(), lineno);
+                } catch (boost::bad_lexical_cast const &) {
+                    log_error("Parameter '%s' must be number in line %d.\n", name.c_str(), lineno);
+                }
+            } else if (name == "DELAY_IBF" || name == "DELAY_OBF") {
+                try {
+                    int delay = boost::lexical_cast<int>(value.c_str());
+                    if (delay >= 0 && delay <= 15) {
+                        props->emplace(ctx->id(name), Property(delay, 4));
+                    } else
+                        log_error("Parameter '%s' must have value from 0 to 15 in line %d.\n", name.c_str(), lineno);
+                } catch (boost::bad_lexical_cast const &) {
+                    log_error("Parameter '%s' must be number in line %d.\n", name.c_str(), lineno);
+                }
+            } else {
+                log_error("Unknown parameter name '%s' in line %d.\n", name.c_str(), lineno);
+            }
+        }
+    }
+
+    std::regex pattern_to_regex(const std::string &pat)
+    {
+        std::string expr;
+        expr.reserve(pat.size() * 2);
+        expr += '^';
+        for (char c : pat) {
+            switch (c) {
+            case '*':
+                expr += ".*";
+                break;
+            case '?':
+                expr += ".";
+                break;
+            // Escape regex metacharacters
+            case '.':
+            case '+':
+            case '(':
+            case ')':
+            case '{':
+            case '}':
+            case '^':
+            case '$':
+            case '|':
+            case '\\':
+            case '[':
+            case ']':
+                expr += '\\';
+                expr += c;
+                break;
+
+            default:
+                expr += c;
+            }
+        }
+        expr += '$';
+        return std::regex(expr);
+    }
+
+    void run()
+    {
+        log_info("Parsing CCF file..\n");
+
+        std::string line;
+        std::string linebuf;
+        defaults.clear();
+
+        auto isempty = [](const std::string &str) {
+            return std::all_of(str.begin(), str.end(), [](char c) { return isblank(c) || c == '\r' || c == '\n'; });
+        };
+        lineno = 0;
+        count = std::vector<int>(uarch->dies, 0);
+        bool floorplanning = false;
+        while (std::getline(in, line)) {
+            ++lineno;
+            // Both // and # are considered start of comment
+            size_t com_start = line.find("//");
+            if (com_start != std::string::npos)
+                line = line.substr(0, com_start);
+            com_start = line.find('#');
+            if (com_start != std::string::npos)
+                line = line.substr(0, com_start);
+            if (isempty(line))
+                continue;
+            linebuf += line;
+
+            boost::algorithm::to_lower(line);
+            if (line.find("start floorplanning") != std::string::npos) {
+                floorplanning = true;
+                linebuf = "";
+                continue;
+            } else if (line.find("end floorplanning") != std::string::npos) {
+                floorplanning = false;
+                linebuf = "";
+                continue;
+            }
+            if (floorplanning) {
+                // int size = -1;
+                std::string src_location;
+
+                std::string s = linebuf;
+                boost::trim(s);
+
+                // split input into segments by ';'
+                std::vector<std::string> segments;
+                boost::split(segments, s, boost::is_any_of(";"));
+                for (auto &seg : segments)
+                    boost::trim(seg);
+
+                if (!segments.empty()) {
+                    std::vector<std::string> parts;
+                    boost::split(parts, segments[0], boost::is_any_of(":"));
+                    for (auto &p : parts)
+                        boost::trim(p);
+
+                    // index is numeric token
+                    // int index = -1;
+                    if (!parts.empty() && !parts[0].empty() &&
+                        std::all_of(parts[0].begin(), parts[0].end(), ::isdigit)) {
+                        // index = std::stoi(parts[0]);
+                        parts.erase(parts.begin());
+                    }
+
+                    // find size
+                    // size = -1;
+                    for (size_t i = 0; i + 1 < parts.size(); ++i) {
+                        if (boost::iequals(parts[i], "size")) {
+                            if (!parts[i + 1].empty() &&
+                                std::all_of(parts[i + 1].begin(), parts[i + 1].end(), ::isdigit)) {
+                                // size = std::stoi(parts[i + 1]);
+                            }
+                            break;
+                        }
+                    }
+
+                    // always the last piece of the main segment
+                    if (!parts.empty()) {
+                        src_location = parts.back();
+                        boost::trim(src_location);
+                    }
+                }
+
+                if (segments.size() > 1) {
+                    std::string &tmp = segments[1];
+                    boost::trim(tmp);
+
+                    if (!tmp.empty()) {
+                        std::vector<std::string> subparts;
+                        boost::split(subparts, tmp, boost::is_any_of(":"));
+                        for (auto &p : subparts)
+                            boost::trim(p);
+
+                        if (!subparts.empty() && boost::iequals(subparts[0], "pb")) {
+                            if (subparts.size() == 2) {
+                                std::string pb_position = subparts[1];
+
+                                std::regex pb_regex(R"(x(-?\d+)y(-?\d+)x(-?\d+)y(-?\d+))");
+                                std::smatch match;
+                                if (std::regex_match(pb_position, match, pb_regex)) {
+                                    int x1 = std::stoi(match[1]) + 2;
+                                    int y1 = std::stoi(match[2]) + 2;
+                                    int x2 = std::stoi(match[3]) + 2;
+                                    int y2 = std::stoi(match[4]) + 2;
+
+                                    if (x1 < 0 || x1 >= ctx->getGridDimX() || x2 < 0 || x2 >= ctx->getGridDimX() ||
+                                        y1 < 0 || y1 >= ctx->getGridDimY() || y2 < 0 || y2 >= ctx->getGridDimY())
+                                        log_error("Placebox coordinates out of range '%s' in line %d.\n",
+                                                  pb_position.c_str(), lineno);
+
+                                    IdString scopename(ctx, src_location.c_str());
+                                    std::regex expr = pattern_to_regex(src_location);
+                                    bool matched_any = false;
+
+                                    for (const IdString &name : uarch->scopenames) {
+                                        if (std::regex_match(name.str(ctx), expr)) {
+                                            matched_any = true;
+
+                                            ctx->createRectangularRegion(name, x1, y1, x2, y2);
+                                            uarch->scopenames_used.emplace(name);
+
+                                            log_info("    Constraining region '%s' to '%s'\n", name.c_str(ctx),
+                                                     pb_position.c_str());
+                                        }
+                                    }
+
+                                    if (!matched_any) {
+                                        log_error("Unknown scope name or pattern: '%s' in line %d.\n",
+                                                  src_location.c_str(), lineno);
+                                    }
+                                } else {
+                                    log_error("Placebox format invalid: %s in line %d.\n", pb_position.c_str(), lineno);
+                                }
+                            } else {
+                                log_error("Missing data for pB (in line %d).\n", lineno);
+                            }
+                        } else {
+                            log_error("Unexpected content in last segment (in line %d).\n", lineno);
+                        }
+                    }
+                }
+
+                linebuf = "";
+                continue;
+            }
+
+            size_t pos = linebuf.find(';');
+            // Need to concatenate lines until there is closing ; sign
+            while (pos != std::string::npos) {
+                std::string content = linebuf.substr(0, pos);
+
+                std::vector<std::string> params;
+                boost::split(params, content, boost::is_any_of("|"));
+                std::string command = params.at(0);
+
+                std::stringstream ss(command);
+                std::vector<std::string> words;
+                std::string tmp;
+                while (ss >> tmp)
+                    words.push_back(tmp);
+                std::string type = words.at(0);
+
+                boost::algorithm::to_lower(type);
+                if (type == "default_gpio") {
+                    if (words.size() != 1)
+                        log_error("Line with default_GPIO should not contain only parameters (in line %d).\n", lineno);
+                    params.erase(params.begin());
+                    parse_params(params, true, &defaults);
+
+                } else if (type == "net" || type == "pin_in" || type == "pin_out" || type == "pin_inout") {
+                    if (words.size() < 3 || words.size() > 5)
+                        log_error("Pin definition line not properly formed (in line %d).\n", lineno);
+                    std::string pin_name = strip_quotes(words.at(1));
+
+                    // put back other words and use them as parameters
+                    std::stringstream ss;
+                    for (size_t i = 2; i < words.size(); i++)
+                        ss << words.at(i);
+                    params[0] = ss.str();
+
+                    IdString cellname = ctx->id(pin_name);
+                    if (ctx->cells.count(cellname)) {
+                        CellInfo *cell = ctx->cells.at(cellname).get();
+                        for (auto p : defaults)
+                            cell->params[p.first] = p.second;
+                        parse_params(params, false, &cell->params);
+                    } else
+                        log_warning("Pad with name '%s' not found in netlist.\n", pin_name.c_str());
+                } else if (type == "start" || type == "end") {
+                    std::string word2 = words.at(1);
+                    boost::algorithm::to_lower(word2);
+                    if (word2 == "floorplanning") {
+                        log("Found floor planning\n");
+                    } else
+                        log_error("Unknown command '%s' in line %d.\n", word2.c_str(), lineno);
+
+                } else {
+                    log_error("Unknown type '%s' in line %d.\n", type.c_str(), lineno);
+                }
+
+                linebuf = linebuf.substr(pos + 1);
+                pos = linebuf.find(';');
+            }
+        }
+        if (!isempty(linebuf))
+            log_error("Unexpected end of CCF file.\n");
+        int max_num = 0;
+        uarch->preferred_die = 0;
+        for (int i = 0; i < uarch->dies; i++) {
+            if (count[i] > max_num) {
+                max_num = count[i];
+                uarch->preferred_die = i;
+            }
+        }
+    }
+};
+
+void GateMateImpl::parse_ccf(const std::string &filename)
+{
+    std::ifstream in(filename);
+    if (!in)
+        log_error("Failed to open CCF file '%s'.\n", filename.c_str());
+    GateMateCCFReader reader(ctx, this, in);
+    reader.run();
+}
+
+NEXTPNR_NAMESPACE_END

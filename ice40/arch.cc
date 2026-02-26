@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -27,8 +27,10 @@
 #include "nextpnr.h"
 #include "placer1.h"
 #include "placer_heap.h"
+#include "placer_static.h"
 #include "router1.h"
 #include "router2.h"
+#include "rust.h"
 #include "timing_opt.h"
 #include "util.h"
 NEXTPNR_NAMESPACE_BEGIN
@@ -111,12 +113,12 @@ Arch::Arch(ArchArgs args) : args(args)
         log_error("Unsupported package '%s'.\n", args.package.c_str());
 
     for (int i = 0; i < chip_info->width; i++) {
-        IdString x_id = id(stringf("X%d", i));
+        IdString x_id = idf("X%d", i);
         x_ids.push_back(x_id);
         id_to_x[x_id] = i;
     }
     for (int i = 0; i < chip_info->height; i++) {
-        IdString y_id = id(stringf("Y%d", i));
+        IdString y_id = idf("Y%d", i);
         y_ids.push_back(y_id);
         id_to_y[y_id] = i;
     }
@@ -169,29 +171,29 @@ std::string Arch::getChipName() const
 IdString Arch::archArgsToId(ArchArgs args) const
 {
     if (args.type == ArchArgs::LP384)
-        return id("lp384");
+        return id_lp384;
     if (args.type == ArchArgs::LP1K)
-        return id("lp1k");
+        return id_lp1k;
     if (args.type == ArchArgs::HX1K)
-        return id("hx1k");
+        return id_hx1k;
     if (args.type == ArchArgs::UP3K)
-        return id("up3k");
+        return id_up3k;
     if (args.type == ArchArgs::UP5K)
-        return id("up5k");
+        return id_up5k;
     if (args.type == ArchArgs::U1K)
-        return id("u1k");
+        return id_u1k;
     if (args.type == ArchArgs::U2K)
-        return id("u2k");
+        return id_u2k;
     if (args.type == ArchArgs::U4K)
-        return id("u4k");
+        return id_u4k;
     if (args.type == ArchArgs::LP4K)
-        return id("lp4k");
+        return id_lp4k;
     if (args.type == ArchArgs::LP8K)
-        return id("lp8k");
+        return id_lp8k;
     if (args.type == ArchArgs::HX4K)
-        return id("hx4k");
+        return id_hx4k;
     if (args.type == ArchArgs::HX8K)
-        return id("hx8k");
+        return id_hx8k;
     return IdString();
 }
 
@@ -289,7 +291,7 @@ std::vector<std::pair<IdString, std::string>> Arch::getBelAttrs(BelId bel) const
 {
     std::vector<std::pair<IdString, std::string>> ret;
 
-    ret.push_back(std::make_pair(id("INDEX"), stringf("%d", bel.index)));
+    ret.push_back(std::make_pair(id_INDEX, stringf("%d", bel.index)));
 
     return ret;
 }
@@ -387,33 +389,33 @@ IdString Arch::getWireType(WireId wire) const
     case WireInfoPOD::WIRE_TYPE_NONE:
         return IdString();
     case WireInfoPOD::WIRE_TYPE_GLB2LOCAL:
-        return id("GLB2LOCAL");
+        return id_GLB2LOCAL;
     case WireInfoPOD::WIRE_TYPE_GLB_NETWK:
-        return id("GLB_NETWK");
+        return id_GLB_NETWK;
     case WireInfoPOD::WIRE_TYPE_LOCAL:
-        return id("LOCAL");
+        return id_LOCAL;
     case WireInfoPOD::WIRE_TYPE_LUTFF_IN:
-        return id("LUTFF_IN");
+        return id_LUTFF_IN;
     case WireInfoPOD::WIRE_TYPE_LUTFF_IN_LUT:
-        return id("LUTFF_IN_LUT");
+        return id_LUTFF_IN_LUT;
     case WireInfoPOD::WIRE_TYPE_LUTFF_LOUT:
-        return id("LUTFF_LOUT");
+        return id_LUTFF_LOUT;
     case WireInfoPOD::WIRE_TYPE_LUTFF_OUT:
-        return id("LUTFF_OUT");
+        return id_LUTFF_OUT;
     case WireInfoPOD::WIRE_TYPE_LUTFF_COUT:
-        return id("LUTFF_COUT");
+        return id_LUTFF_COUT;
     case WireInfoPOD::WIRE_TYPE_LUTFF_GLOBAL:
-        return id("LUTFF_GLOBAL");
+        return id_LUTFF_GLOBAL;
     case WireInfoPOD::WIRE_TYPE_CARRY_IN_MUX:
-        return id("CARRY_IN_MUX");
+        return id_CARRY_IN_MUX;
     case WireInfoPOD::WIRE_TYPE_SP4_V:
-        return id("SP4_V");
+        return id_SP4_V;
     case WireInfoPOD::WIRE_TYPE_SP4_H:
-        return id("SP4_H");
+        return id_SP4_H;
     case WireInfoPOD::WIRE_TYPE_SP12_V:
-        return id("SP12_V");
+        return id_SP12_V;
     case WireInfoPOD::WIRE_TYPE_SP12_H:
-        return id("SP12_H");
+        return id_SP12_H;
     }
     return IdString();
 }
@@ -423,11 +425,11 @@ std::vector<std::pair<IdString, std::string>> Arch::getWireAttrs(WireId wire) co
     std::vector<std::pair<IdString, std::string>> ret;
     auto &wi = chip_info->wire_data[wire.index];
 
-    ret.push_back(std::make_pair(id("INDEX"), stringf("%d", wire.index)));
+    ret.push_back(std::make_pair(id_INDEX, stringf("%d", wire.index)));
 
-    ret.push_back(std::make_pair(id("GRID_X"), stringf("%d", wi.x)));
-    ret.push_back(std::make_pair(id("GRID_Y"), stringf("%d", wi.y)));
-    ret.push_back(std::make_pair(id("GRID_Z"), stringf("%d", wi.z)));
+    ret.push_back(std::make_pair(id_GRID_X, stringf("%d", wi.x)));
+    ret.push_back(std::make_pair(id_GRID_Y, stringf("%d", wi.y)));
+    ret.push_back(std::make_pair(id_GRID_Z, stringf("%d", wi.z)));
 
     return ret;
 }
@@ -476,7 +478,7 @@ std::vector<std::pair<IdString, std::string>> Arch::getPipAttrs(PipId pip) const
 {
     std::vector<std::pair<IdString, std::string>> ret;
 
-    ret.push_back(std::make_pair(id("INDEX"), stringf("%d", pip.index)));
+    ret.push_back(std::make_pair(id_INDEX, stringf("%d", pip.index)));
 
     return ret;
 }
@@ -639,50 +641,9 @@ std::vector<GroupId> Arch::getGroupGroups(GroupId group) const
 
 // -----------------------------------------------------------------------
 
-bool Arch::getBudgetOverride(const NetInfo *net_info, const PortRef &sink, delay_t &budget) const
-{
-    const auto &driver = net_info->driver;
-    if (driver.port == id_COUT) {
-        NPNR_ASSERT(sink.port == id_CIN || sink.port == id_I3);
-        NPNR_ASSERT(driver.cell->constr_abs_z);
-        bool cin = sink.port == id_CIN;
-        bool same_y = driver.cell->constr_z < 7;
-        if (cin && same_y)
-            budget = 0;
-        else {
-            switch (args.type) {
-            case ArchArgs::HX8K:
-            case ArchArgs::HX4K:
-            case ArchArgs::HX1K:
-                budget = cin ? 190 : (same_y ? 260 : 560);
-                break;
-            case ArchArgs::LP384:
-            case ArchArgs::LP1K:
-            case ArchArgs::LP4K:
-            case ArchArgs::LP8K:
-                budget = cin ? 290 : (same_y ? 380 : 670);
-                break;
-            case ArchArgs::UP3K:
-            case ArchArgs::UP5K:
-            case ArchArgs::U1K:
-            case ArchArgs::U2K:
-            case ArchArgs::U4K:
-                budget = cin ? 560 : (same_y ? 660 : 1220);
-                break;
-            default:
-                log_error("Unsupported iCE40 chip type.\n");
-            }
-        }
-        return true;
-    }
-    return false;
-}
-
-// -----------------------------------------------------------------------
-
 bool Arch::place()
 {
-    std::string placer = str_or_default(settings, id("placer"), defaultPlacer);
+    std::string placer = str_or_default(settings, id_placer, defaultPlacer);
     if (placer == "heap") {
         PlacerHeapCfg cfg(getCtx());
         cfg.ioBufTypes.insert(id_SB_IO);
@@ -691,23 +652,81 @@ bool Arch::place()
     } else if (placer == "sa") {
         if (!placer1(getCtx(), Placer1Cfg(getCtx())))
             return false;
+    } else if (placer == "static") {
+        PlacerStaticCfg cfg(getCtx());
+        cfg.logic_groups = 1;
+        {
+            cfg.cell_groups.emplace_back();
+            auto &comb = cfg.cell_groups.back();
+            comb.name = getCtx()->id("COMB");
+            comb.cell_area[id_ICESTORM_LC] = StaticRect(1.0f, 0.125f);
+            comb.bel_area[id_ICESTORM_LC] = StaticRect(1.0f, 0.125f);
+            comb.spacer_rect = StaticRect(1.0f, 0.125f);
+        }
+
+        {
+            cfg.cell_groups.emplace_back();
+            auto &comb = cfg.cell_groups.back();
+            comb.name = getCtx()->id("RAM");
+            comb.cell_area[id_ICESTORM_RAM] = StaticRect(1.0f, 2.0f);
+            comb.bel_area[id_ICESTORM_RAM] = StaticRect(1.0f, 2.0f);
+            comb.spacer_rect = StaticRect(1.0f, 2.0f);
+        }
+
+        {
+            cfg.cell_groups.emplace_back();
+            auto &comb = cfg.cell_groups.back();
+            comb.name = getCtx()->id("DSP");
+            comb.cell_area[id_ICESTORM_DSP] = StaticRect(0.9f, 5.0f);
+            comb.bel_area[id_ICESTORM_DSP] = StaticRect(0.9f, 5.0f);
+            comb.spacer_rect = StaticRect(0.9f, 5.0f);
+        }
+
+        {
+            cfg.cell_groups.emplace_back();
+            auto &comb = cfg.cell_groups.back();
+            comb.name = getCtx()->id("GB");
+            comb.cell_area[id_SB_GB] = StaticRect(0.5f, 0.5f);
+            comb.bel_area[id_SB_GB] = StaticRect(0.5f, 0.5f);
+            comb.spacer_rect = StaticRect(0.5f, 0.5f);
+        }
+
+        {
+            cfg.cell_groups.emplace_back();
+            auto &comb = cfg.cell_groups.back();
+            comb.name = getCtx()->id("WARMBOOT");
+            comb.cell_area[id_SB_WARMBOOT] = StaticRect(0.5f, 1.0f);
+            comb.bel_area[id_SB_WARMBOOT] = StaticRect(0.5f, 1.0f);
+            comb.spacer_rect = StaticRect(0.5f, 1.0f);
+        }
+
+        {
+            cfg.cell_groups.emplace_back();
+            auto &comb = cfg.cell_groups.back();
+            comb.name = getCtx()->id("IO");
+            comb.cell_area[id_SB_IO] = StaticRect(0.5f, 0.5f);
+            comb.bel_area[id_SB_IO] = StaticRect(0.5f, 0.5f);
+            comb.spacer_rect = StaticRect(0.5f, 0.5f);
+        }
+        if (!placer_static(getCtx(), cfg))
+            return false;
     } else {
         log_error("iCE40 architecture does not support placer '%s'\n", placer.c_str());
     }
     bool retVal = true;
-    if (bool_or_default(settings, id("opt_timing"), false)) {
+    if (bool_or_default(settings, id_opt_timing, false)) {
         TimingOptCfg tocfg(getCtx());
         tocfg.cellTypes.insert(id_ICESTORM_LC);
         retVal = timing_opt(getCtx(), tocfg);
     }
-    getCtx()->settings[getCtx()->id("place")] = 1;
+    getCtx()->settings[id_place] = 1;
     archInfoToAttributes();
     return retVal;
 }
 
 bool Arch::route()
 {
-    std::string router = str_or_default(settings, id("router"), defaultRouter);
+    std::string router = str_or_default(settings, id_router, defaultRouter);
     bool result;
     if (router == "router1") {
         result = router1(getCtx(), Router1Cfg(getCtx()));
@@ -717,7 +736,7 @@ bool Arch::route()
     } else {
         log_error("iCE40 architecture does not support router '%s'\n", router.c_str());
     }
-    getCtx()->settings[getCtx()->id("route")] = 1;
+    getCtx()->settings[id_route] = 1;
     archInfoToAttributes();
     return result;
 }
@@ -904,7 +923,7 @@ std::vector<GraphicElement> Arch::getDecalGraphics(DecalId decal) const
             ret.push_back(el);
         }
 
-        if (bel_type == id_ICESTORM_PLL || bel_type == id_SB_WARMBOOT) {
+        if (bel_type.in(id_ICESTORM_PLL, id_SB_WARMBOOT)) {
             GraphicElement el;
             el.type = GraphicElement::TYPE_BOX;
             el.style = decal.active ? GraphicElement::STYLE_ACTIVE : GraphicElement::STYLE_INACTIVE;
@@ -923,10 +942,21 @@ std::vector<GraphicElement> Arch::getDecalGraphics(DecalId decal) const
 
 bool Arch::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort, DelayQuad &delay) const
 {
-    if (cell->type == id_ICESTORM_LC && cell->lcInfo.dffEnable) {
-        if (toPort == id_O)
-            return false;
-    } else if (cell->type == id_ICESTORM_RAM || cell->type == id_ICESTORM_SPRAM) {
+    if (cell->type == id_ICESTORM_LC) {
+        if (toPort == id_O) {
+            if (cell->lcInfo.dffEnable)
+                return false;
+            // "false paths"
+            if (fromPort == id_I0 && ((cell->lcInfo.lutInputMask & 0x1U) == 0))
+                return false;
+            if (fromPort == id_I1 && ((cell->lcInfo.lutInputMask & 0x2U) == 0))
+                return false;
+            if (fromPort == id_I2 && ((cell->lcInfo.lutInputMask & 0x4U) == 0))
+                return false;
+            if (fromPort == id_I3 && ((cell->lcInfo.lutInputMask & 0x8U) == 0))
+                return false;
+        }
+    } else if (cell->type.in(id_ICESTORM_RAM, id_ICESTORM_SPRAM)) {
         return false;
     }
     return get_cell_delay_internal(cell, fromPort, toPort, delay);
@@ -960,7 +990,7 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
             return TMG_CLOCK_INPUT;
         if (port == id_CIN)
             return TMG_COMB_INPUT;
-        if (port == id_COUT || port == id_LO)
+        if (port.in(id_COUT, id_LO))
             return TMG_COMB_OUTPUT;
         if (port == id_O) {
             // LCs with no inputs are constant drivers
@@ -980,7 +1010,7 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
         }
     } else if (cell->type == id_ICESTORM_RAM) {
 
-        if (port == id_RCLK || port == id_WCLK)
+        if (port.in(id_RCLK, id_WCLK))
             return TMG_CLOCK_INPUT;
 
         clockInfoCount = 1;
@@ -989,8 +1019,8 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
             return TMG_REGISTER_OUTPUT;
         else
             return TMG_REGISTER_INPUT;
-    } else if (cell->type == id_ICESTORM_DSP || cell->type == id_ICESTORM_SPRAM) {
-        if (port == id_CLK || port == id_CLOCK)
+    } else if (cell->type.in(id_ICESTORM_DSP, id_ICESTORM_SPRAM)) {
+        if (port.in(id_CLK, id_CLOCK))
             return TMG_CLOCK_INPUT;
         else {
             clockInfoCount = 1;
@@ -1000,7 +1030,7 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
                 return TMG_REGISTER_INPUT;
         }
     } else if (cell->type == id_SB_IO) {
-        if (port == id_INPUT_CLK || port == id_OUTPUT_CLK)
+        if (port.in(id_INPUT_CLK, id_OUTPUT_CLK))
             return TMG_CLOCK_INPUT;
         if (port == id_CLOCK_ENABLE) {
             clockInfoCount = 2;
@@ -1012,7 +1042,7 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
         } else if (port == id_D_IN_0) {
             return TMG_STARTPOINT;
         }
-        if (port == id_D_OUT_0 || port == id_D_OUT_1) {
+        if (port.in(id_D_OUT_0, id_D_OUT_1)) {
             if ((cell->ioInfo.pintype & 0xC) == 0x8) {
                 return TMG_ENDPOINT;
             } else {
@@ -1030,7 +1060,7 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
 
         return TMG_IGNORE;
     } else if (cell->type == id_ICESTORM_PLL) {
-        if (port == id_PLLOUT_A || port == id_PLLOUT_B || port == id_PLLOUT_A_GLOBAL || port == id_PLLOUT_B_GLOBAL)
+        if (port.in(id_PLLOUT_A, id_PLLOUT_B, id_PLLOUT_A_GLOBAL, id_PLLOUT_B_GLOBAL))
             return TMG_GEN_CLOCK;
         return TMG_IGNORE;
     } else if (cell->type == id_ICESTORM_LFOSC) {
@@ -1052,19 +1082,19 @@ TimingPortClass Arch::getPortTimingClass(const CellInfo *cell, IdString port, in
             return TMG_IGNORE;
         return TMG_ENDPOINT;
     } else if (cell->type == id_SB_RGB_DRV) {
-        if (port == id_RGB0 || port == id_RGB1 || port == id_RGB2 || port == id_RGBPU)
+        if (port.in(id_RGB0, id_RGB1, id_RGB2, id_RGBPU))
             return TMG_IGNORE;
         return TMG_ENDPOINT;
     } else if (cell->type == id_SB_RGBA_DRV) {
-        if (port == id_RGB0 || port == id_RGB1 || port == id_RGB2)
+        if (port.in(id_RGB0, id_RGB1, id_RGB2))
             return TMG_IGNORE;
         return TMG_ENDPOINT;
     } else if (cell->type == id_SB_LEDDA_IP) {
-        if (port == id_CLK || port == id_CLOCK)
+        if (port.in(id_CLK, id_CLOCK))
             return TMG_CLOCK_INPUT;
         return TMG_IGNORE;
-    } else if (cell->type == id_SB_I2C || cell->type == id_SB_SPI) {
-        if (port == this->id("SBCLKI"))
+    } else if (cell->type.in(id_SB_I2C, id_SB_SPI)) {
+        if (port == id_SBCLKI)
             return TMG_CLOCK_INPUT;
 
         clockInfoCount = 1;
@@ -1087,7 +1117,7 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
             bool has_clktoq = get_cell_delay_internal(cell, id_CLK, id_O, info.clockToQ);
             NPNR_ASSERT(has_clktoq);
         } else {
-            if (port == id_I0 || port == id_I1 || port == id_I2 || port == id_I3) {
+            if (port.in(id_I0, id_I1, id_I2, id_I3)) {
                 DelayQuad dlut;
                 bool has_ld = get_cell_delay_internal(cell, port, id_O, dlut);
                 NPNR_ASSERT(has_ld);
@@ -1108,10 +1138,10 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
     } else if (cell->type == id_ICESTORM_RAM) {
         if (port.str(this)[0] == 'R') {
             info.clock_port = id_RCLK;
-            info.edge = bool_or_default(cell->params, id("NEG_CLK_R")) ? FALLING_EDGE : RISING_EDGE;
+            info.edge = bool_or_default(cell->params, id_NEG_CLK_R) ? FALLING_EDGE : RISING_EDGE;
         } else {
             info.clock_port = id_WCLK;
-            info.edge = bool_or_default(cell->params, id("NEG_CLK_W")) ? FALLING_EDGE : RISING_EDGE;
+            info.edge = bool_or_default(cell->params, id_NEG_CLK_W) ? FALLING_EDGE : RISING_EDGE;
         }
         if (cell->ports.at(port).type == PORT_OUT) {
             bool has_clktoq = get_cell_delay_internal(cell, info.clock_port, port, info.clockToQ);
@@ -1135,7 +1165,7 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
             info.edge = cell->ioInfo.negtrig ? FALLING_EDGE : RISING_EDGE;
             info.setup = DelayPair(io_setup);
             info.hold = DelayPair(0);
-        } else if (port == id_D_OUT_0 || port == id_OUTPUT_ENABLE) {
+        } else if (port.in(id_D_OUT_0, id_OUTPUT_ENABLE)) {
             info.clock_port = id_OUTPUT_CLK;
             info.edge = cell->ioInfo.negtrig ? FALLING_EDGE : RISING_EDGE;
             info.setup = DelayPair(io_setup);
@@ -1156,7 +1186,7 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
         } else {
             NPNR_ASSERT_FALSE("no clock data for IO cell port");
         }
-    } else if (cell->type == id_ICESTORM_DSP || cell->type == id_ICESTORM_SPRAM) {
+    } else if (cell->type.in(id_ICESTORM_DSP, id_ICESTORM_SPRAM)) {
         info.clock_port = cell->type == id_ICESTORM_SPRAM ? id_CLOCK : id_CLK;
         info.edge = RISING_EDGE;
         if (cell->ports.at(port).type == PORT_OUT) {
@@ -1167,8 +1197,8 @@ TimingClockingInfo Arch::getPortClockingInfo(const CellInfo *cell, IdString port
             info.setup = DelayPair(100);
             info.hold = DelayPair(0);
         }
-    } else if (cell->type == id_SB_I2C || cell->type == id_SB_SPI) {
-        info.clock_port = this->id("SBCLKI");
+    } else if (cell->type.in(id_SB_I2C, id_SB_SPI)) {
+        info.clock_port = id_SBCLKI;
         info.edge = RISING_EDGE;
         if (cell->ports.at(port).type == PORT_OUT) {
             /* Dummy number */
@@ -1219,32 +1249,44 @@ void Arch::assignCellInfo(CellInfo *cell)
         cell->lcInfo.dffEnable = bool_or_default(cell->params, id_DFF_ENABLE);
         cell->lcInfo.carryEnable = bool_or_default(cell->params, id_CARRY_ENABLE);
         cell->lcInfo.negClk = bool_or_default(cell->params, id_NEG_CLK);
-        cell->lcInfo.clk = get_net_or_empty(cell, id_CLK);
-        cell->lcInfo.cen = get_net_or_empty(cell, id_CEN);
-        cell->lcInfo.sr = get_net_or_empty(cell, id_SR);
+        cell->lcInfo.clk = cell->getPort(id_CLK);
+        cell->lcInfo.cen = cell->getPort(id_CEN);
+        cell->lcInfo.sr = cell->getPort(id_SR);
         cell->lcInfo.inputCount = 0;
-        if (get_net_or_empty(cell, id_I0))
+        if (cell->getPort(id_I0))
             cell->lcInfo.inputCount++;
-        if (get_net_or_empty(cell, id_I1))
+        if (cell->getPort(id_I1))
             cell->lcInfo.inputCount++;
-        if (get_net_or_empty(cell, id_I2))
+        if (cell->getPort(id_I2))
             cell->lcInfo.inputCount++;
-        if (get_net_or_empty(cell, id_I3))
+        if (cell->getPort(id_I3))
             cell->lcInfo.inputCount++;
+        // Find don't care LUT inputs to mask for timing analysis
+        cell->lcInfo.lutInputMask = 0x0;
+        unsigned init = int_or_default(cell->params, id_LUT_INIT);
+        for (unsigned k = 0; k < 4; k++) {
+            for (unsigned i = 0; i < 16; i++) {
+                // If toggling the LUT input makes a difference it's not a don't care
+                if (((init >> i) & 0x1U) != ((init >> (i ^ (1U << k))) & 0x1U)) {
+                    cell->lcInfo.lutInputMask |= (1U << k);
+                    break;
+                }
+            }
+        }
     } else if (cell->type == id_SB_IO) {
         cell->ioInfo.lvds = str_or_default(cell->params, id_IO_STANDARD, "SB_LVCMOS") == "SB_LVDS_INPUT";
-        cell->ioInfo.global = bool_or_default(cell->attrs, this->id("GLOBAL"));
-        cell->ioInfo.pintype = int_or_default(cell->params, this->id("PIN_TYPE"));
-        cell->ioInfo.negtrig = bool_or_default(cell->params, this->id("NEG_TRIGGER"));
+        cell->ioInfo.global = bool_or_default(cell->attrs, id_GLOBAL);
+        cell->ioInfo.pintype = int_or_default(cell->params, id_PIN_TYPE);
+        cell->ioInfo.negtrig = bool_or_default(cell->params, id_NEG_TRIGGER);
 
     } else if (cell->type == id_SB_GB) {
-        cell->gbInfo.forPadIn = bool_or_default(cell->attrs, this->id("FOR_PAD_IN"));
+        cell->gbInfo.forPadIn = bool_or_default(cell->attrs, id_FOR_PAD_IN);
     }
 }
 
-ArcBounds Arch::getRouteBoundingBox(WireId src, WireId dst) const
+BoundingBox Arch::getRouteBoundingBox(WireId src, WireId dst) const
 {
-    ArcBounds bb;
+    BoundingBox bb;
 
     int src_x = chip_info->wire_data[src.index].x;
     int src_y = chip_info->wire_data[src.index].y;
@@ -1266,17 +1308,9 @@ ArcBounds Arch::getRouteBoundingBox(WireId src, WireId dst) const
     return bb;
 }
 
-#ifdef WITH_HEAP
 const std::string Arch::defaultPlacer = "heap";
-#else
-const std::string Arch::defaultPlacer = "sa";
-#endif
 
-const std::vector<std::string> Arch::availablePlacers = {"sa",
-#ifdef WITH_HEAP
-                                                         "heap"
-#endif
-};
+const std::vector<std::string> Arch::availablePlacers = {"sa", "heap", "static"};
 
 const std::string Arch::defaultRouter = "router1";
 const std::vector<std::string> Arch::availableRouters = {"router1", "router2"};

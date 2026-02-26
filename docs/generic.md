@@ -1,8 +1,12 @@
 # nextpnr Generic Architecture
 
-Instead of implementing the [C++ API](archapi.md), you can programmatically 
+Instead of implementing the full [C++ API](archapi.md), you can programmatically 
 build up a description of an FPGA using the generic architecture and the 
-Python API.
+Python API, or the [Viaduct C++ API](viaduct.md) (described further in its own
+document).
+
+The Viaduct API allows more complex constraints to be implemented and has shorter
+startup times than using the Python API.
 
 A basic packer is provided that supports LUTs, flipflops and IO buffer insertion.
 Packing could also be implemented using the Python API.
@@ -12,53 +16,60 @@ will be worked on in the future.
 
 ## Python API
 
-All identifiers (`IdString`) are automatically converted to
-and from a Python string, so no manual conversion is required.
+All identifiers (`IdString`, `IdStringList`, `WireId`, `PipId`, and `BelId`) are
+automatically converted to and from a Python string, so no manual conversion is
+required.
+
+`IdStringList`s will be most efficient if strings can be split according to a
+separator (currently fixed to `/`), as only the components need be stored 
+in-memory. For example; instead of needing to store an entire pip name
+`X33/Y45/V4A_TO_A6` which scales badly for large numbers of pips; the strings
+`X33`, `Y45` and `V4A_TO_A6` are stored.
 
 Argument names are included in the Python bindings,
 so named arguments may be used.
 
-### void addWire(IdString name, IdString type, int x, int y);
+### void addWire(IdStringList name, IdString type, int x, int y);
 
 Adds a wire with a name, type (for user purposes only, ignored by all nextpnr code other than the UI) to the FPGA description. x and y give a nominal location of the wire for delay estimation purposes. Delay estimates are important for router performance (as the router uses an A* type algorithm), even if timing is not of importance.
 
-### addPip(IdString name, IdString type, IdString srcWire, IdString dstWire, float delay, Loc loc);
+### addPip(IdStringList name, IdString type, WireId srcWire, WireId dstWire, float delay, Loc loc);
 
 Adds a pip (programmable connection between two named wires). Pip delays that correspond to delay estimates are important for router performance (as the router uses an A* type algorithm), even if timing is otherwise not of importance.
 
 Loc is constructed using `Loc(x, y, z)`. 'z' for pips is only important if region constraints (e.g. for partial reconfiguration regions) are used.
 
-### void addBel(IdString name, IdString type, Loc loc, bool gb, bool hidden);
+### void addBel(IdStringList name, IdString type, Loc loc, bool gb, bool hidden);
 
 Adds a bel to the FPGA description. Bel type should match the type of cells in the netlist that are placed at this bel (see below for information on special bel types supported by the packer). Loc is constructed using `Loc(x, y, z)` and must be unique. If `hidden` is true, then the bel will not be included in utilisation reports (e.g. for routing/internal use bels).
 
-### void addBelInput(IdString bel, IdString name, IdString wire);
-### void addBelOutput(IdString bel, IdString name, IdString wire);
-### void addBelInout(IdString bel, IdString name, IdString wire);
+### void addBelInput(BelId bel, IdString name, WireId wire);
+### void addBelOutput(BelId bel, IdString name, WireId wire);
+### void addBelInout(BelId bel, IdString name, WireId wire);
 
 Adds an input, output or inout pin to a bel, with an associated wire. Note that both `bel` and `wire` must have been created before calling this function.
 
-### void addGroupBel(IdString group, IdString bel);
-### void addGroupWire(IdString group, IdString wire);
-### void addGroupPip(IdString group, IdString pip);
+### void addGroupBel(IdString group, BelId bel);
+### void addGroupWire(IdString group, WireId wire);
+### void addGroupPip(IdString group, PipId pip);
 ### void addGroupGroup(IdString group, IdString grp);
 
 Add a bel, wire, pip or subgroup to a group, which will be created if it doesn't already exist. Groups are purely for visual presentation purposes in the user interface and are not used by any place-and-route algorithms.
 
-### void addDecalGraphic(DecalId decal, const GraphicElement &graphic);
+### void addDecalGraphic(IdStringList decal, const GraphicElement &graphic);
 
 Add a graphic element to a _decal_, a reusable drawing that may be used to represent multiple wires, pips, bels or groups in the UI (with different offsets). The decal will be created if it doesn't already exist
 
-### void setWireDecal(WireId wire, DecalXY decalxy);
-### void setPipDecal(PipId pip, DecalXY decalxy);
-### void setBelDecal(BelId bel, DecalXY decalxy);
-### void setGroupDecal(GroupId group, DecalXY decalxy);
+### void setWireDecal(WireId wire, float x, float y, IdStringList decal);
+### void setPipDecal(PipId pip, float x, float y, IdStringList decal);
+### void setBelDecal(BelId bel, float x, float y, IdStringList decal);
+### void setGroupDecal(GroupId group, float x, float y, IdStringList decal);
 
 Sets the decal ID and offset for a wire, bel, pip or group in the UI.
 
-### void setWireAttr(IdString wire, IdString key, const std::string &value);
-### void setPipAttr(IdString pip, IdString key, const std::string &value);
-### void setBelAttr(IdString bel, IdString key, const std::string &value);
+### void setWireAttr(WireId wire, IdString key, const std::string &value);
+### void setPipAttr(PipId pip, IdString key, const std::string &value);
+### void setBelAttr(BelId bel, IdString key, const std::string &value);
 
 Sets an attribute on a wire, pip or bel. Attributes are displayed in the tree view in the UI, but have no bearing on place-and-route itself.
 
@@ -122,4 +133,4 @@ The following constraints are enforced by the generic architecture during placem
 
 ## Implementation Example
 
-An artificial, procedural architecture is included in the [generic/examples](../generic/examples) folder. [simple.py](../generic/examples/simple.py) sets up the architecture, and [report.py](../generic/examples/report.py) saves post-place-and-route design to a text file (in place of bitstream generation). [simple.sh](../generic/examples/simple.sh) can be used to synthesise and place-and-route a simple blinky for this architecture.
+An artificial, procedural architecture is included in the [generic/examples](../generic/examples) folder. [simple.py](../generic/examples/simple.py) sets up the architecture, and [bitstream.py](../generic/examples/bitstream.py) saves the post-place-and-route design to a FASM format file (which could be used for bitstream generation). [simple.sh](../generic/examples/simple.sh) can be used to synthesise and place-and-route a simple blinky for this architecture.

@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -30,12 +30,9 @@ struct NexusPostPlaceOpt
     Context *ctx;
     TimingAnalyser tmg;
 
-    NexusPostPlaceOpt(Context *ctx) : ctx(ctx), tmg(ctx){};
+    NexusPostPlaceOpt(Context *ctx) : ctx(ctx), tmg(ctx) {};
 
-    inline bool is_constrained(CellInfo *cell)
-    {
-        return cell->constr_parent != nullptr || !cell->constr_children.empty();
-    }
+    inline bool is_constrained(CellInfo *cell) { return cell->cluster != ClusterId(); }
 
     bool swap_cell_placement(CellInfo *cell, BelId new_bel)
     {
@@ -91,18 +88,18 @@ struct NexusPostPlaceOpt
     void opt_lutffs()
     {
         int moves_made = 0;
-        for (auto cell : sorted(ctx->cells)) {
+        for (auto &cell : ctx->cells) {
             // Search for FF cells
-            CellInfo *ff = cell.second;
+            CellInfo *ff = cell.second.get();
             if (ff->type != id_OXIDE_FF)
                 continue;
             // Check M ('fabric') input net
-            NetInfo *m = get_net_or_empty(ff, id_M);
+            NetInfo *m = ff->getPort(id_M);
             if (m == nullptr)
                 continue;
 
             // Ignore FFs that need both DI and M (PRLD mode)
-            if (get_net_or_empty(ff, id_DI) != nullptr)
+            if (ff->getPort(id_DI) != nullptr)
                 continue;
 
             const auto &drv = m->driver;
@@ -121,7 +118,7 @@ struct NexusPostPlaceOpt
             if (dest_ff != ff->bel) {
                 // If dest_ff is already placed *and* using direct 'DI' input, don't touch it
                 CellInfo *dest_ff_cell = ctx->getBoundBelCell(dest_ff);
-                if (dest_ff_cell != nullptr && get_net_or_empty(dest_ff_cell, id_DI) != nullptr)
+                if (dest_ff_cell != nullptr && dest_ff_cell->getPort(id_DI) != nullptr)
                     continue;
                 // Attempt the swap
                 bool swap_result = swap_cell_placement(ff, dest_ff);
@@ -129,7 +126,7 @@ struct NexusPostPlaceOpt
                     continue;
             }
             // Use direct interconnect
-            rename_port(ctx, ff, id_M, id_DI);
+            ff->renamePort(id_M, id_DI);
             ff->params[id_SEL] = std::string("DL");
             ++moves_made;
             continue;
@@ -151,7 +148,7 @@ struct NexusPostPlaceOpt
 
 void Arch::post_place_opt()
 {
-    if (bool_or_default(settings, id("no_post_place_opt")))
+    if (bool_or_default(settings, id_no_post_place_opt))
         return;
     log_info("Running post-place optimisations...\n");
     NexusPostPlaceOpt opt(getCtx());

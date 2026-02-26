@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -36,13 +36,11 @@ class Worker : public QObject
   public Q_SLOTS:
     void newContext(Context *);
     void pack();
-    void budget(double freq);
     void place(bool timing_driven);
     void route();
   Q_SIGNALS:
     void log(const std::string &text);
     void pack_finished(bool status);
-    void budget_finish(bool status);
     void place_finished(bool status);
     void route_finished(bool status);
     void taskCanceled();
@@ -73,14 +71,12 @@ class TaskManager : public QObject
     void contextChanged(Context *ctx);
     void terminate();
     void pack();
-    void budget(double freq);
     void place(bool timing_driven);
     void route();
 
     // redirected signals
     void log(const std::string &text);
     void pack_finished(bool status);
-    void budget_finish(bool status);
     void place_finished(bool status);
     void route_finished(bool status);
     void taskCanceled();

@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -18,8 +18,6 @@
  *
  */
 
-#ifdef MAIN_EXECUTABLE
-
 #include <fstream>
 #include "bitstream.h"
 #include "command.h"
@@ -34,8 +32,8 @@ class Ice40CommandHandler : public CommandHandler
 {
   public:
     Ice40CommandHandler(int argc, char **argv);
-    virtual ~Ice40CommandHandler(){};
-    std::unique_ptr<Context> createContext(std::unordered_map<std::string, Property> &values) override;
+    virtual ~Ice40CommandHandler() {};
+    std::unique_ptr<Context> createContext(dict<std::string, Property> &values) override;
     void setupArchContext(Context *ctx) override;
     void validate() override;
     void customAfterLoad(Context *ctx) override;
@@ -129,7 +127,7 @@ void Ice40CommandHandler::setupArchContext(Context *ctx)
     }
 }
 
-std::unique_ptr<Context> Ice40CommandHandler::createContext(std::unordered_map<std::string, Property> &values)
+std::unique_ptr<Context> Ice40CommandHandler::createContext(dict<std::string, Property> &values)
 {
     ArchArgs chipArgs;
     chipArgs.type = ArchArgs::NONE;
@@ -265,13 +263,13 @@ std::unique_ptr<Context> Ice40CommandHandler::createContext(std::unordered_map<s
 
     ctx->settings[ctx->id("arch.package")] = ctx->archArgs().package;
     if (vm.count("promote-logic"))
-        ctx->settings[ctx->id("promote_logic")] = Property::State::S1;
+        ctx->settings[id_promote_logic] = Property::State::S1;
     if (vm.count("no-promote-globals"))
-        ctx->settings[ctx->id("no_promote_globals")] = Property::State::S1;
+        ctx->settings[id_no_promote_globals] = Property::State::S1;
     if (vm.count("opt-timing"))
-        ctx->settings[ctx->id("opt_timing")] = Property::State::S1;
+        ctx->settings[id_opt_timing] = Property::State::S1;
     if (vm.count("pcf-allow-unconstrained"))
-        ctx->settings[ctx->id("pcf_allow_unconstrained")] = Property::State::S1;
+        ctx->settings[id_pcf_allow_unconstrained] = Property::State::S1;
     return ctx;
 }
 
@@ -280,5 +278,3 @@ int main(int argc, char *argv[])
     Ice40CommandHandler handler(argc, argv);
     return handler.exec();
 }
-
-#endif

@@ -44,7 +44,7 @@ do_sat() {
                         rename top gold
                         read_verilog ${2}${1}.v
                         rename top gate
-                        read_verilog +/machxo2/cells_sim.v
+                        read_verilog +/lattice/cells_sim_xo2.v
 
                         miter -equiv -make_assert -flatten gold gate ${2}${1}_miter
                         hierarchy -top ${2}${1}_miter
@@ -56,11 +56,12 @@ do_smt() {
                         rename top gold
                         read_verilog ${2}${1}.v
                         rename top gate
-                        read_verilog +/machxo2/cells_sim.v
+                        read_verilog +/lattice/cells_sim_xo2.v
 
                         miter -equiv -make_assert gold gate ${2}${1}_miter
                         hierarchy -top ${2}${1}_miter; proc;
                         opt_clean
+                        flatten t:*FACADE_IO*
                         write_verilog ${2}${1}_miter.v
                         write_smt2 ${2}${1}_miter.smt2"
 
@@ -71,9 +72,9 @@ do_smt() {
 set -ex
 
 ${YOSYS:-yosys} -p "read_verilog ${1}.v
-                    synth_machxo2 -noiopad -json ${1}.json"
-${NEXTPNR:-../../nextpnr-machxo2} $NEXTPNR_MODE --1200 --package QFN32 --no-iobs --json ${1}.json --write ${2}${1}.json
-${YOSYS:-yosys} -p "read_verilog -lib +/machxo2/cells_sim.v
+                    synth_lattice -family xo2 -json ${1}.json"
+${NEXTPNR:-../../nextpnr-machxo2} $NEXTPNR_MODE --device LCMXO2-1200HC-4SG32C --json ${1}.json --write ${2}${1}.json
+${YOSYS:-yosys} -p "read_verilog -lib +/lattice/cells_sim_xo2.v
                     read_json ${2}${1}.json
                     clean -purge
                     write_verilog -noattr -norename ${2}${1}.v"

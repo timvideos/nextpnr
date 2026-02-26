@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2020  David Shah <dave@ds0.me>
+ *  Copyright (C) 2020  gatecat <gatecat@ds0.me>
  *
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
@@ -96,7 +96,7 @@ bool Arch::nexus_logic_tile_valid(LogicTileStatus &lts) const
     return true;
 }
 
-bool Arch::isBelLocationValid(BelId bel) const
+bool Arch::isBelLocationValid(BelId bel, bool explain_invalid) const
 {
     if (bel_tile_is(bel, LOC_LOGIC)) {
         LogicTileStatus *lts = tileStatus[bel.tile].lts;

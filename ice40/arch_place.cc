@@ -1,9 +1,9 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -82,7 +82,7 @@ static inline bool _io_pintype_need_clk_en(unsigned pin_type)
     return _io_pintype_need_clk_in(pin_type) || _io_pintype_need_clk_out(pin_type);
 }
 
-bool Arch::isBelLocationValid(BelId bel) const
+bool Arch::isBelLocationValid(BelId bel, bool explain_invalid) const
 {
     if (getBelType(bel) == id_ICESTORM_LC) {
         std::array<const CellInfo *, 8> bel_cells;
@@ -95,7 +95,7 @@ bool Arch::isBelLocationValid(BelId bel) const
         }
         return logic_cells_compatible(bel_cells.data(), num_cells);
     } else {
-        CellInfo *cell = getBoundBelCell(bel);
+        const CellInfo *cell = getBoundBelCell(bel);
         if (cell == nullptr)
             return true;
         else if (cell->type == id_SB_IO) {
@@ -105,9 +105,9 @@ bool Arch::isBelLocationValid(BelId bel) const
             // that are a PLL clock output.
             auto wire = getBelPinWire(bel, id_D_IN_0);
             for (auto pin : getWireBelPins(wire)) {
-                if (pin.pin == id_PLLOUT_A || pin.pin == id_PLLOUT_B) {
+                if (pin.pin.in(id_PLLOUT_A, id_PLLOUT_B)) {
                     // Is there a PLL there ?
-                    auto pll_cell = getBoundBelCell(pin.bel);
+                    const CellInfo *pll_cell = getBoundBelCell(pin.bel);
                     if (pll_cell == nullptr)
                         break;
 
@@ -116,14 +116,16 @@ bool Arch::isBelLocationValid(BelId bel) const
                         break;
 
                     // Is that SB_IO used at an input ?
-                    if ((cell->ports[id_D_IN_0].net == nullptr) && (cell->ports[id_D_IN_1].net == nullptr))
+                    if ((cell->getPort(id_D_IN_0) == nullptr) && (cell->getPort(id_D_IN_1) == nullptr))
                         break;
 
                     // Are we perhaps a PAD INPUT Bel that can be placed here?
-                    if (pll_cell->attrs[id("BEL_PAD_INPUT")] == getBelName(bel).str(getCtx()))
+                    if (str_or_default(pll_cell->attrs, id_BEL_PAD_INPUT, "") == getBelName(bel).str(getCtx()))
                         return true;
 
                     // Conflict
+                    if (explain_invalid)
+                        log_nonfatal_error("Cell '%s' conflicts with PLL cell '%s'\n", nameOf(cell), nameOf(pll_cell));
                     return false;
                 }
             }
@@ -135,18 +137,29 @@ bool Arch::isBelLocationValid(BelId bel) const
             // Check LVDS pairing
             if (cell->ioInfo.lvds) {
                 // Check correct z and complement location is free
-                if (ioLoc.z != 0)
+                if (ioLoc.z != 0) {
+                    if (explain_invalid)
+                        log_nonfatal_error("Bel '%s' can't be used for LVDS\n", getCtx()->nameOfBel(bel));
                     return false;
+                }
                 BelId compBel = getBelByLocation(compLoc);
                 CellInfo *compCell = getBoundBelCell(compBel);
-                if (compCell)
+                if (compCell) {
+                    if (explain_invalid)
+                        log_nonfatal_error("Cell '%s' LVDS complement occupied by cell '%s'\n", nameOf(cell),
+                                           nameOf(compCell));
                     return false;
+                }
             } else {
                 // Check LVDS IO is not placed at complement location
                 BelId compBel = getBelByLocation(compLoc);
-                CellInfo *compCell = getBoundBelCell(compBel);
-                if (compCell && compCell->ioInfo.lvds)
+                const CellInfo *compCell = getBoundBelCell(compBel);
+                if (compCell && compCell->ioInfo.lvds) {
+                    if (explain_invalid)
+                        log_nonfatal_error("Cell '%s' can't occupy LVDS complement of cell '%s'\n", nameOf(cell),
+                                           nameOf(compCell));
                     return false;
+                }
 
                 // Check for conflicts on shared nets
                 // - CLOCK_ENABLE
@@ -161,15 +174,20 @@ bool Arch::isBelLocationValid(BelId bel) const
                             _io_pintype_need_clk_en(cell->ioInfo.pintype),
                             _io_pintype_need_clk_en(compCell->ioInfo.pintype),
                     };
-                    NetInfo *nets[] = {
-                            cell->ports[id_INPUT_CLK].net,    compCell->ports[id_INPUT_CLK].net,
-                            cell->ports[id_OUTPUT_CLK].net,   compCell->ports[id_OUTPUT_CLK].net,
-                            cell->ports[id_CLOCK_ENABLE].net, compCell->ports[id_CLOCK_ENABLE].net,
+                    const NetInfo *nets[] = {
+                            cell->getPort(id_INPUT_CLK),    compCell->getPort(id_INPUT_CLK),
+                            cell->getPort(id_OUTPUT_CLK),   compCell->getPort(id_OUTPUT_CLK),
+                            cell->getPort(id_CLOCK_ENABLE), compCell->getPort(id_CLOCK_ENABLE),
                     };
 
                     for (int i = 0; i < 6; i++)
-                        if (use[i] && (nets[i] != nets[i ^ 1]) && (use[i ^ 1] || (nets[i ^ 1] != nullptr)))
+                        if (use[i] && (nets[i] != nets[i ^ 1]) && (use[i ^ 1] || (nets[i ^ 1] != nullptr))) {
+                            if (explain_invalid)
+                                log_nonfatal_error("Net '%s' for cell '%s' conflicts with net '%s' for '%s'\n",
+                                                   nameOf(nets[i]), nameOf(cell), nameOf(nets[i ^ 1]),
+                                                   nameOf(compCell));
                             return false;
+                        }
                 }
             }
 

@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Clifford Wolf <clifford@symbioticeda.com>
+ *  Copyright (C) 2018  Claire Xenia Wolf <claire@yosyshq.com>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -23,10 +23,12 @@
 #include <map>
 
 #include "arch_api.h"
+#include "base_arch.h"
 #include "idstring.h"
 #include "idstringlist.h"
 #include "nextpnr_namespaces.h"
 #include "nextpnr_types.h"
+#include "viaduct_api.h"
 
 NEXTPNR_NAMESPACE_BEGIN
 
@@ -60,8 +62,6 @@ struct WireInfo
     std::map<IdString, std::string> attrs;
     NetInfo *bound_net;
     std::vector<PipId> downhill, uphill;
-    BelPin uphill_bel_pin;
-    std::vector<BelPin> downhill_bel_pins;
     std::vector<BelPin> bel_pins;
     DecalXY decalxy;
     int x, y;
@@ -80,7 +80,7 @@ struct BelInfo
     IdString type;
     std::map<IdString, std::string> attrs;
     CellInfo *bound_cell;
-    std::unordered_map<IdString, PinInfo> pins;
+    dict<IdString, PinInfo> pins;
     DecalXY decalxy;
     int x, y, z;
     bool gb;
@@ -101,46 +101,50 @@ struct CellDelayKey
 {
     IdString from, to;
     inline bool operator==(const CellDelayKey &other) const { return from == other.from && to == other.to; }
+    unsigned int hash() const { return mkhash(from.hash(), to.hash()); }
 };
-
-NEXTPNR_NAMESPACE_END
-namespace std {
-template <> struct hash<NEXTPNR_NAMESPACE_PREFIX CellDelayKey>
-{
-    std::size_t operator()(const NEXTPNR_NAMESPACE_PREFIX CellDelayKey &dk) const noexcept
-    {
-        std::size_t seed = std::hash<NEXTPNR_NAMESPACE_PREFIX IdString>()(dk.from);
-        seed ^= std::hash<NEXTPNR_NAMESPACE_PREFIX IdString>()(dk.to) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-        return seed;
-    }
-};
-} // namespace std
-NEXTPNR_NAMESPACE_BEGIN
 
 struct CellTiming
 {
-    std::unordered_map<IdString, TimingPortClass> portClasses;
-    std::unordered_map<CellDelayKey, DelayQuad> combDelays;
-    std::unordered_map<IdString, std::vector<TimingClockingInfo>> clockingInfo;
+    dict<IdString, TimingPortClass> portClasses;
+    dict<CellDelayKey, DelayQuad> combDelays;
+    dict<IdString, std::vector<TimingClockingInfo>> clockingInfo;
 };
 
-struct ArchRanges
+template <typename TId> struct linear_range
+{
+    struct iterator
+    {
+        explicit iterator(int32_t index) : index(index) {};
+        int32_t index;
+        bool operator==(const iterator &other) const { return index == other.index; }
+        bool operator!=(const iterator &other) const { return index != other.index; }
+        void operator++() { ++index; }
+        TId operator*() const { return TId(index); }
+    };
+    explicit linear_range(int32_t size) : size(size) {};
+    int32_t size;
+    iterator begin() const { return iterator(0); }
+    iterator end() const { return iterator(size); }
+};
+
+struct ArchRanges : BaseArchRanges
 {
     using ArchArgsT = ArchArgs;
     // Bels
-    using AllBelsRangeT = const std::vector<BelId> &;
+    using AllBelsRangeT = linear_range<BelId>;
     using TileBelsRangeT = const std::vector<BelId> &;
     using BelAttrsRangeT = const std::map<IdString, std::string> &;
     using BelPinsRangeT = std::vector<IdString>;
     using CellBelPinRangeT = const std::vector<IdString> &;
     // Wires
-    using AllWiresRangeT = const std::vector<WireId> &;
+    using AllWiresRangeT = linear_range<WireId>;
     using DownhillPipRangeT = const std::vector<PipId> &;
     using UphillPipRangeT = const std::vector<PipId> &;
     using WireBelPinRangeT = const std::vector<BelPin> &;
     using WireAttrsRangeT = const std::map<IdString, std::string> &;
     // Pips
-    using AllPipsRangeT = const std::vector<PipId> &;
+    using AllPipsRangeT = linear_range<PipId>;
     using PipAttrsRangeT = const std::map<IdString, std::string> &;
     // Groups
     using AllGroupsRangeT = std::vector<GroupId>;
@@ -156,61 +160,74 @@ struct ArchRanges
     using BucketBelRangeT = std::vector<BelId>;
 };
 
-struct Arch : ArchAPI<ArchRanges>
+struct Arch : BaseArch<ArchRanges>
 {
     std::string chipName;
+    std::unique_ptr<ViaductAPI> uarch{};
 
-    std::unordered_map<IdStringList, WireInfo> wires;
-    std::unordered_map<IdStringList, PipInfo> pips;
-    std::unordered_map<IdStringList, BelInfo> bels;
-    std::unordered_map<GroupId, GroupInfo> groups;
+    std::vector<WireInfo> wires;
+    std::vector<PipInfo> pips;
+    std::vector<BelInfo> bels;
+    dict<GroupId, GroupInfo> groups;
 
-    // These functions include useful errors if not found
-    WireInfo &wire_info(IdStringList wire);
-    PipInfo &pip_info(IdStringList wire);
-    BelInfo &bel_info(IdStringList wire);
+    WireInfo &wire_info(WireId wire) { return wires.at(wire.index); }
+    PipInfo &pip_info(PipId pip) { return pips.at(pip.index); }
+    BelInfo &bel_info(BelId bel) { return bels.at(bel.index); }
 
-    std::vector<IdStringList> bel_ids, wire_ids, pip_ids;
+    const WireInfo &wire_info(WireId wire) const { return wires.at(wire.index); }
+    const PipInfo &pip_info(PipId pip) const { return pips.at(pip.index); }
+    const BelInfo &bel_info(BelId bel) const { return bels.at(bel.index); }
 
-    std::unordered_map<Loc, BelId> bel_by_loc;
+    dict<IdStringList, WireId> wire_by_name;
+    dict<IdStringList, PipId> pip_by_name;
+    dict<IdStringList, BelId> bel_by_name;
+
+    dict<Loc, BelId> bel_by_loc;
     std::vector<std::vector<std::vector<BelId>>> bels_by_tile;
 
-    std::unordered_map<DecalId, std::vector<GraphicElement>> decal_graphics;
+    dict<DecalId, std::vector<GraphicElement>> decal_graphics;
 
     int gridDimX, gridDimY;
     std::vector<std::vector<int>> tileBelDimZ;
     std::vector<std::vector<int>> tilePipDimZ;
 
-    std::unordered_map<IdString, CellTiming> cellTiming;
+    dict<IdString, CellTiming> cellTiming;
 
-    void addWire(IdStringList name, IdString type, int x, int y);
-    void addPip(IdStringList name, IdString type, IdStringList srcWire, IdStringList dstWire, delay_t delay, Loc loc);
+    WireId addWire(IdStringList name, IdString type, int x, int y);
+    PipId addPip(IdStringList name, IdString type, WireId srcWire, WireId dstWire, delay_t delay, Loc loc);
 
-    void addBel(IdStringList name, IdString type, Loc loc, bool gb, bool hidden);
-    void addBelInput(IdStringList bel, IdString name, IdStringList wire);
-    void addBelOutput(IdStringList bel, IdString name, IdStringList wire);
-    void addBelInout(IdStringList bel, IdString name, IdStringList wire);
+    BelId addBel(IdStringList name, IdString type, Loc loc, bool gb, bool hidden);
+    void addBelInput(BelId bel, IdString name, WireId wire);
+    void addBelOutput(BelId bel, IdString name, WireId wire);
+    void addBelInout(BelId bel, IdString name, WireId wire);
+    void addBelPin(BelId bel, IdString name, WireId wire, PortType type);
 
-    void addGroupBel(IdStringList group, IdStringList bel);
-    void addGroupWire(IdStringList group, IdStringList wire);
-    void addGroupPip(IdStringList group, IdStringList pip);
+    WireId addWireAsBelInput(BelId bel, IdString name);
+    WireId addWireAsBelOutput(BelId bel, IdString name);
+    WireId addWireAsBelInout(BelId bel, IdString name);
+
+    void addGroupBel(IdStringList group, BelId bel);
+    void addGroupWire(IdStringList group, WireId wire);
+    void addGroupPip(IdStringList group, PipId pip);
     void addGroupGroup(IdStringList group, IdStringList grp);
 
-    void addDecalGraphic(DecalId decal, const GraphicElement &graphic);
-    void setWireDecal(WireId wire, DecalXY decalxy);
-    void setPipDecal(PipId pip, DecalXY decalxy);
-    void setBelDecal(BelId bel, DecalXY decalxy);
-    void setGroupDecal(GroupId group, DecalXY decalxy);
+    void addDecalGraphic(IdStringList decal, const GraphicElement &graphic);
+    void setWireDecal(WireId wire, float x, float y, IdStringList decal);
+    void setPipDecal(PipId pip, float x, float y, IdStringList decal);
+    void setBelDecal(BelId bel, float x, float y, IdStringList decal);
+    void setGroupDecal(GroupId group, float x, float y, IdStringList decal);
 
-    void setWireAttr(IdStringList wire, IdString key, const std::string &value);
-    void setPipAttr(IdStringList pip, IdString key, const std::string &value);
-    void setBelAttr(IdStringList bel, IdString key, const std::string &value);
+    void setWireAttr(WireId wire, IdString key, const std::string &value);
+    void setPipAttr(PipId pip, IdString key, const std::string &value);
+    void setBelAttr(BelId bel, IdString key, const std::string &value);
 
     void setLutK(int K);
     void setDelayScaling(double scale, double offset);
 
     void addCellTimingClock(IdString cell, IdString port);
     void addCellTimingDelay(IdString cell, IdString fromPort, IdString toPort, delay_t delay);
+    void addCellTimingDelayMinMax(IdString cell, IdString fromPort, IdString toPort, delay_t min_delay,
+                                  delay_t max_delay);
     void addCellTimingSetupHold(IdString cell, IdString port, IdString clock, delay_t setup, delay_t hold);
     void addCellTimingClockToOut(IdString cell, IdString port, IdString clock, delay_t clktoq);
 
@@ -247,7 +264,7 @@ struct Arch : ArchAPI<ArchRanges>
     bool checkBelAvail(BelId bel) const override;
     CellInfo *getBoundBelCell(BelId bel) const override;
     CellInfo *getConflictingBelCell(BelId bel) const override;
-    const std::vector<BelId> &getBels() const override;
+    linear_range<BelId> getBels() const override;
     IdString getBelType(BelId bel) const override;
     bool getBelHidden(BelId bel) const override;
     const std::map<IdString, std::string> &getBelAttrs(BelId bel) const override;
@@ -268,7 +285,7 @@ struct Arch : ArchAPI<ArchRanges>
     WireId getConflictingWireWire(WireId wire) const override { return wire; }
     NetInfo *getConflictingWireNet(WireId wire) const override;
     DelayQuad getWireDelay(WireId wire) const override { return DelayQuad(0); }
-    const std::vector<WireId> &getWires() const override;
+    linear_range<WireId> getWires() const override;
     const std::vector<BelPin> &getWireBelPins(WireId wire) const override;
 
     PipId getPipByName(IdStringList name) const override;
@@ -279,11 +296,11 @@ struct Arch : ArchAPI<ArchRanges>
     void bindPip(PipId pip, NetInfo *net, PlaceStrength strength) override;
     void unbindPip(PipId pip) override;
     bool checkPipAvail(PipId pip) const override;
-    bool checkPipAvailForNet(PipId pip, NetInfo *net) const override;
+    bool checkPipAvailForNet(PipId pip, const NetInfo *net) const override;
     NetInfo *getBoundPipNet(PipId pip) const override;
     WireId getConflictingPipWire(PipId pip) const override;
     NetInfo *getConflictingPipNet(PipId pip) const override;
-    const std::vector<PipId> &getPips() const override;
+    linear_range<PipId> getPips() const override;
     Loc getPipLocation(PipId pip) const override;
     WireId getPipSrcWire(PipId pip) const override;
     WireId getPipDstWire(PipId pip) const override;
@@ -300,17 +317,16 @@ struct Arch : ArchAPI<ArchRanges>
     const std::vector<GroupId> &getGroupGroups(GroupId group) const override;
 
     delay_t estimateDelay(WireId src, WireId dst) const override;
-    delay_t predictDelay(const NetInfo *net_info, const PortRef &sink) const override;
-    delay_t getDelayEpsilon() const override { return 0.001; }
-    delay_t getRipupDelayPenalty() const override { return 0.015; }
+    delay_t predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const override;
+    delay_t getDelayEpsilon() const override { return delay_epsilon; }
+    delay_t getRipupDelayPenalty() const override { return ripup_penalty; }
     float getDelayNS(delay_t v) const override { return v; }
 
     delay_t getDelayFromNS(float ns) const override { return ns; }
 
     uint32_t getDelayChecksum(delay_t v) const override { return 0; }
-    bool getBudgetOverride(const NetInfo *net_info, const PortRef &sink, delay_t &budget) const override;
 
-    ArcBounds getRouteBoundingBox(WireId src, WireId dst) const override;
+    BoundingBox getRouteBoundingBox(WireId src, WireId dst) const override;
 
     bool pack() override;
     bool place() override;
@@ -318,9 +334,11 @@ struct Arch : ArchAPI<ArchRanges>
 
     std::vector<IdString> getCellTypes() const override
     {
-        std::unordered_set<IdString> cell_types;
+        if (uarch)
+            return uarch->getCellTypes();
+        pool<IdString> cell_types;
         for (auto bel : bels) {
-            cell_types.insert(bel.second.type);
+            cell_types.insert(bel.type);
         }
 
         return std::vector<IdString>{cell_types.begin(), cell_types.end()};
@@ -332,9 +350,15 @@ struct Arch : ArchAPI<ArchRanges>
 
     BelBucketId getBelBucketByName(IdString bucket) const override { return bucket; }
 
-    BelBucketId getBelBucketForBel(BelId bel) const override { return getBelType(bel); }
+    BelBucketId getBelBucketForBel(BelId bel) const override
+    {
+        return uarch ? uarch->getBelBucketForBel(bel) : getBelType(bel);
+    }
 
-    BelBucketId getBelBucketForCellType(IdString cell_type) const override { return cell_type; }
+    BelBucketId getBelBucketForCellType(IdString cell_type) const override
+    {
+        return uarch ? uarch->getBelBucketForCellType(cell_type) : cell_type;
+    }
 
     std::vector<BelId> getBelsInBucket(BelBucketId bucket) const override
     {
@@ -359,8 +383,11 @@ struct Arch : ArchAPI<ArchRanges>
     // Get the TimingClockingInfo of a port
     TimingClockingInfo getPortClockingInfo(const CellInfo *cell, IdString port, int index) const override;
 
-    bool isValidBelForCellType(IdString cell_type, BelId bel) const override { return cell_type == getBelType(bel); }
-    bool isBelLocationValid(BelId bel) const override;
+    bool isValidBelForCellType(IdString cell_type, BelId bel) const override
+    {
+        return uarch ? uarch->isValidBelForCellType(cell_type, bel) : cell_type == getBelType(bel);
+    }
+    bool isBelLocationValid(BelId bel, bool explain_invalid = false) const override;
 
     static const std::string defaultPlacer;
     static const std::vector<std::string> availablePlacers;
@@ -371,6 +398,9 @@ struct Arch : ArchAPI<ArchRanges>
     // Internal usage
     void assignArchInfo() override;
     bool cellsCompatible(const CellInfo **cells, int count) const;
+
+    float delay_epsilon = 0.001;
+    float ripup_penalty = 0.015;
 };
 
 NEXTPNR_NAMESPACE_END

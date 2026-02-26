@@ -1,8 +1,8 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  Miodrag Milanovic <miodrag@symbioticeda.com>
- *  Copyright (C) 2018  Serge Bazanski <q3k@symbioticeda.com>
+ *  Copyright (C) 2018  Miodrag Milanovic <micko@yosyshq.com>
+ *  Copyright (C) 2018  Serge Bazanski <q3k@q3k.org>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -20,6 +20,7 @@
 
 #include "designwidget.h"
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QGridLayout>
 #include <QLineEdit>
@@ -316,6 +317,24 @@ void DesignWidget::newContext(Context *ctx)
 #ifdef ARCH_ECP5
             for (const auto &wire : ctx->getWires()) {
                 wireMap[std::pair<int, int>(wire.location.x, wire.location.y)].push_back(wire);
+            }
+#endif
+#ifdef ARCH_MACHXO2
+            for (const auto &wire : ctx->getWires()) {
+                wireMap[std::pair<int, int>(wire.location.x, wire.location.y)].push_back(wire);
+            }
+#endif
+#ifdef ARCH_GOWIN
+            for (const auto &wire : ctx->getWires()) {
+                WireInfo wi = ctx->wire_info(wire);
+                wireMap[std::pair<int, int>(wi.x, wi.y)].push_back(wire);
+            }
+#endif
+#ifdef ARCH_HIMBAECHEL
+            for (const auto &wire : ctx->getWires()) {
+                Loc loc;
+                tile_xy(ctx->chip_info, wire.tile, loc.x, loc.y);
+                wireMap[std::pair<int, int>(loc.x, loc.y)].push_back(wire);
             }
 #endif
             auto wireGetter = [](Context *ctx, WireId id) { return ctx->getWireName(id); };
@@ -615,6 +634,8 @@ void DesignWidget::onSelectionChanged(int num, const QItemSelection &, const QIt
         addProperty(topItem, QVariant::String, "Type", ctx->getBelType(bel).c_str(ctx));
         addProperty(topItem, QVariant::Bool, "Available", ctx->checkBelAvail(bel));
         addProperty(topItem, QVariant::String, "Bound Cell", ctx->nameOf(ctx->getBoundBelCell(bel)), ElementType::CELL);
+        addProperty(topItem, QVariant::String, "Bound Cell Type",
+                    ctx->getBoundBelCell(bel) ? ctx->getBoundBelCell(bel)->type.c_str(ctx) : "");
         addProperty(topItem, QVariant::String, "Conflicting Cell", ctx->nameOf(ctx->getConflictingBelCell(bel)),
                     ElementType::CELL);
 
@@ -655,8 +676,8 @@ void DesignWidget::onSelectionChanged(int num, const QItemSelection &, const QIt
         DelayQuad delay = ctx->getWireDelay(wire);
 
         QtProperty *delayItem = addSubGroup(topItem, "Delay");
-        addProperty(delayItem, QVariant::Double, "Min Raise", delay.minRiseDelay());
-        addProperty(delayItem, QVariant::Double, "Max Raise", delay.maxRiseDelay());
+        addProperty(delayItem, QVariant::Double, "Min Rise", delay.minRiseDelay());
+        addProperty(delayItem, QVariant::Double, "Max Rise", delay.maxRiseDelay());
         addProperty(delayItem, QVariant::Double, "Min Fall", delay.minFallDelay());
         addProperty(delayItem, QVariant::Double, "Max Fall", delay.maxFallDelay());
 
@@ -724,8 +745,8 @@ void DesignWidget::onSelectionChanged(int num, const QItemSelection &, const QIt
         DelayQuad delay = ctx->getPipDelay(pip);
 
         QtProperty *delayItem = addSubGroup(topItem, "Delay");
-        addProperty(delayItem, QVariant::Double, "Min Raise", delay.minRiseDelay());
-        addProperty(delayItem, QVariant::Double, "Max Raise", delay.maxRiseDelay());
+        addProperty(delayItem, QVariant::Double, "Min Rise", delay.minRiseDelay());
+        addProperty(delayItem, QVariant::Double, "Max Rise", delay.maxRiseDelay());
         addProperty(delayItem, QVariant::Double, "Min Fall", delay.minFallDelay());
         addProperty(delayItem, QVariant::Double, "Max Fall", delay.maxFallDelay());
     } else if (type == ElementType::NET) {
@@ -740,7 +761,6 @@ void DesignWidget::onSelectionChanged(int num, const QItemSelection &, const QIt
 
         QtProperty *driverItem = addSubGroup(topItem, "Driver");
         addProperty(driverItem, QVariant::String, "Port", net->driver.port.c_str(ctx));
-        addProperty(driverItem, QVariant::Double, "Budget", net->driver.budget);
         if (net->driver.cell)
             addProperty(driverItem, QVariant::String, "Cell", net->driver.cell->name.c_str(ctx), ElementType::CELL);
         else
@@ -751,7 +771,6 @@ void DesignWidget::onSelectionChanged(int num, const QItemSelection &, const QIt
             QtProperty *portItem = addSubGroup(usersItem, item.port.c_str(ctx));
 
             addProperty(portItem, QVariant::String, "Port", item.port.c_str(ctx));
-            addProperty(portItem, QVariant::Double, "Budget", item.budget);
             if (item.cell)
                 addProperty(portItem, QVariant::String, "Cell", item.cell->name.c_str(ctx), ElementType::CELL);
             else

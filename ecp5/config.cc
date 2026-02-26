@@ -1,7 +1,7 @@
 /*
  *  nextpnr -- Next Generation Place and Route
  *
- *  Copyright (C) 2018  David Shah <david@symbioticeda.com>
+ *  Copyright (C) 2018  gatecat <gatecat@ds0.me>
  *
  *  Permission to use, copy, modify, and/or distribute this software for any
  *  purpose with or without fee is hereby granted, provided that the above
@@ -20,7 +20,9 @@
 #include "config.h"
 #include <boost/range/adaptor/reversed.hpp>
 #include <iomanip>
+#include <set>
 #include "log.h"
+
 NEXTPNR_NAMESPACE_BEGIN
 
 #define fmt(x) (static_cast<const std::ostringstream &>(std::ostringstream() << x).str())
